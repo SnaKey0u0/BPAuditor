@@ -105,13 +105,13 @@ class Switch(QAbstractButton):
             p.drawText(QRectF(46, 0, self.width() - 46, self.height()), Qt.AlignVCenter, self.text())
 
 
-class Dots(QWidget):
-    """近期戰績的勝敗方塊：自己畫，每格有各自的提示框。
+class ResultBars(QWidget):
+    """近期戰績的勝敗長條：贏的朝上（綠）、輸的朝下（紅），由新到舊；每場有各自的提示框。
 
-    以實際螢幕像素計算位置：125% 這類非整數縮放下，邏輯座標會落在半個像素上，
-    反鋸齒的淡邊會讓深淺不同的方塊看起來高低不一、間距不均。
+    用上下方向表示勝敗，不靠顏色也看得懂。位置以實際螢幕像素計算：125% 這類非整數縮放下，
+    邏輯座標會落在半個像素上，反鋸齒的淡邊會讓長條寬窄、間距不一。
     """
-    SIZE, GAP = 9, 2
+    BAR, GAP, HALF = 5, 2, 8  # 邏輯像素：長條寬、間距、基準線上下各自的高度
 
     def __init__(self):
         super().__init__()
@@ -122,15 +122,14 @@ class Dots(QWidget):
         self.items = items
         self.updateGeometry(); self.update()
 
-    def _metrics(self) -> tuple[float, int, int]:
-        """(縮放比, 方塊邊長, 方塊間距)，後兩者以實際像素計。"""
-        dpr = self.devicePixelRatioF()
-        return dpr, max(round(self.SIZE * dpr), 1), max(round(self.GAP * dpr), 1)
+    def _metrics(self, dpr: float) -> tuple[int, int, int]:
+        """(長條寬, 間距, 半高)，以實際像素計。"""
+        return tuple(max(round(v * dpr), 1) for v in (self.BAR, self.GAP, self.HALF))
 
     def sizeHint(self):
         n = 10 if self.items is None else len(self.items)
-        dpr, size, gap = self._metrics()
-        return QSize(math.ceil(max(n * (size + gap) - gap, 0) / dpr), self.SIZE + 2)
+        dpr = self.devicePixelRatioF(); bar, gap, _ = self._metrics(dpr)
+        return QSize(math.ceil(max(n * (bar + gap) - gap, 0) / dpr), 2 * self.HALF + 2)
 
     def minimumSizeHint(self):
         return self.sizeHint()
@@ -138,24 +137,27 @@ class Dots(QWidget):
     def paintEvent(self, e):
         p = QPainter(self)
         t = p.deviceTransform(); dpr = t.m11()
-        size, gap = max(round(self.SIZE * dpr), 1), max(round(self.GAP * dpr), 1)
-        x0 = round(t.dx()); y0 = round(t.dy() + (self.height() * dpr - size) / 2)
+        bar, gap, half = self._metrics(dpr)
+        x0 = round(t.dx()); base = round(t.dy() + (self.height() * dpr - 1) / 2)  # 基準線那一列像素
+        width = round(self.width() * dpr)
 
-        def rect(x: int, w: int) -> QRectF:  # 實際像素 → 邏輯座標，四邊都落在整數像素上
-            return QRectF((x - t.dx()) / dpr, (y0 - t.dy()) / dpr, w / dpr, size / dpr)
+        def rect(x: int, y: int, w: int, h: int) -> QRectF:  # 實際像素 → 邏輯座標，四邊都落在整數像素上
+            return QRectF((x - t.dx()) / dpr, (y - t.dy()) / dpr, w / dpr, h / dpr)
 
-        p.setRenderHint(QPainter.Antialiasing); p.setPen(Qt.NoPen)
+        p.setPen(Qt.NoPen)
         if self.items is None:
-            p.setBrush(QColor(SKELETON)); p.drawRoundedRect(rect(x0, round(self.width() * dpr)), 3, 3)
+            p.setBrush(QColor(SKELETON)); p.drawRect(rect(x0, base - half, width, 2 * half + 1))
             return
+        p.setBrush(QColor("#3a3f4b")); p.drawRect(rect(x0, base, width, 1))
         for i, (win, _) in enumerate(self.items):
+            x = x0 + i * (bar + gap)
             p.setBrush(QColor(GREEN if win else RED))
-            p.drawRoundedRect(rect(x0 + i * (size + gap), size), 1.5, 1.5)
+            p.drawRect(rect(x, base - half, bar, half) if win else rect(x, base + 1, bar, half))
 
     def event(self, e):
         if e.type() == QEvent.ToolTip and self.items:
-            dpr, size, gap = self._metrics()
-            i = int(e.pos().x() * dpr // (size + gap))
+            dpr = self.devicePixelRatioF(); bar, gap, _ = self._metrics(dpr)
+            i = int(e.pos().x() * dpr // (bar + gap))
             if 0 <= i < len(self.items):
                 QToolTip.showText(e.globalPos(), self.items[i][1], self)
             else:
@@ -180,7 +182,7 @@ class PlayerCard(QFrame):
         self.big = QLabel(); self.big.setMinimumWidth(80)
         g.addWidget(self.big, 2, 0, 2, 1)
         self.kda = QLabel(); g.addWidget(self.kda, 2, 1)
-        self.dots = Dots()
+        self.dots = ResultBars()
         g.addWidget(self.dots, 3, 1, 1, 2, alignment=Qt.AlignLeft)  # 跨到右欄：20 場才放得下
         self.champ = QLineEdit(); self.champ.setPlaceholderText("查詢特定英雄"); self.champ.setFixedWidth(130)
         self.champ.textChanged.connect(self.update_champion)

@@ -7,7 +7,7 @@
 1. 執行 `BPAuditor.exe`。
 2. 第一次啟動會開設定頁。到 <https://developer.riotgames.com> 用 Riot 帳號登入，複製 **API Key**，程式會自動存入。再填上你自己的 Riot ID（`名稱#標籤`），用來標示「與你相遇」。改名後程式會自動更新。
 3. 在遊戲聊天室選取並複製房間訊息，程式會自動稽查並閃爍工作列。名單沒變就不重查，多了新人只查新的人。
-4. 想看某人某隻英雄的表現：在卡片的「查詢特定英雄」輸入中文名（會自動補完）。滑鼠停在勝敗色塊上可看那場的英雄與 KDA。
+4. 想看某人某隻英雄的表現：在卡片的「查詢特定英雄」輸入中文名（會自動補完）。勝敗長條贏的朝上、輸的朝下，滑鼠停在長條上可看那場的英雄與 KDA。
 
 視窗的 ✕ 會縮到系統匣，剪貼簿監看繼續運作；要結束程式請在系統匣圖示按右鍵 →「結束」。設定頁可以開啟「開機時啟動」（只對 exe 有效）。
 
@@ -22,7 +22,7 @@
 
 ```powershell
 py -3.11 -m venv .venv
-.venv\Scripts\pip install -r requirements.txt -r requirements-dev.txt
+.venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python -m pytest            # 測試
 .venv\Scripts\python run.py               # 執行
 .venv\Scripts\python tools\make_icon.py   # 重新產生 assets\icon.ico 與 icon.png
