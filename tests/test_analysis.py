@@ -54,3 +54,30 @@ def test_find_encounter_most_recent_and_side():
     e = find_encounter("me", ["m1", "m5", "m9"], "x", member_ms)
     assert (e.games_ago, e.ally) == (1, True)
     assert find_encounter("me", ["m1"], "x", member_ms) is None
+
+
+def _histories(games, players):
+    """games: [(match_id, [同隊的人])]，新 → 舊；每位玩家只拿到自己有出場的對戰。"""
+    ms = [match(mid, [p.lower() for p in team], ["stranger"]) for mid, team in games]
+    return {p: (p.lower(), [m for m, (_, team) in zip(ms, games) if p in team]) for p in players}
+
+
+def test_duo_and_trio_reported_as_two_groups():
+    g = [(f"x{i}", ["A", "B"]) for i in range(3)] + [(f"y{i}", ["C", "D", "E"]) for i in range(3)]
+    groups = detect_premades(_histories(g, "ABCDE"))
+    assert [g.members for g in groups] == [["C", "D", "E"], ["A", "B"]]
+
+
+def test_rotating_trios_merged_into_one_group_with_max_pair_stats():
+    # 四人輪流三排，四人同場只有最舊的 1 場 → 仍合併成一組，場數取兩兩配對的最大值
+    g = [("g1", ["A", "B", "C"]), ("g2", ["A", "B", "D"]), ("g3", ["A", "C", "D"]),
+         ("g4", ["B", "C", "D"]), ("g5", ["A", "B", "C", "D"])]
+    groups = detect_premades(_histories(g, "ABCDE"))
+    assert [(g.members, g.streak, g.total) for g in groups] == [(["A", "B", "C", "D"], 2, 3)]
+
+
+def test_groups_bridged_by_one_pair_merged():
+    g = ([(f"x{i}", ["A", "B"]) for i in range(3)] + [(f"y{i}", ["C", "D"]) for i in range(3)]
+         + [(f"q{i}", ["B", "C"]) for i in range(3)])
+    groups = detect_premades(_histories(g, "ABCDE"))
+    assert [g.members for g in groups] == [["A", "B", "C", "D"]]

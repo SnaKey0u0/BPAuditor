@@ -117,18 +117,12 @@ def detect_premades(histories: dict[str, tuple[str, list[dict]]]) -> list[Premad
     for l in labels:
         comps.setdefault(find(l), []).append(l)
 
+    # 有配對連起來的人併成一組，場數取組內兩兩配對的最大值
     groups = []
     for comp in comps.values():
-        if len(comp) < 2:
-            continue
-        if len(comp) > 2:
-            s, t = _group_stats(histories, comp)
-            if _flagged(s, t):
-                groups.append(PremadeGroup(comp, s, t))
-                continue
-        for (a, b), (s, t) in pairs.items():
-            if a in comp:
-                groups.append(PremadeGroup([a, b], s, t))
+        stats = [st for (a, _), st in pairs.items() if a in comp]
+        if stats:
+            groups.append(PremadeGroup(comp, max(s for s, _ in stats), max(t for _, t in stats)))
     return sorted(groups, key=lambda g: (-len(g.members), -g.streak))
 
 
