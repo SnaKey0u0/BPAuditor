@@ -1,7 +1,7 @@
 """產生 App 圖示 assets/icon.png 與多尺寸 assets/icon.ico。
 
-圖示：血條分格的血壓錶（綠→黃→紅，指針打爆）+ 金框深紅底 + LOL 字樣。
-不使用任何 Riot 商標或美術素材；字樣用一般字型。
+圖示：血條分格的血壓錶（綠→黃→紅，指針打爆）+ 金框深紅底。
+不使用任何 Riot 商標或美術素材。
 執行：.venv\Scripts\python tools\make_icon.py
 """
 import math
@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QLinearGradient, QPainter, QPainterPath, QPen
 
 GOLD, WHITE, DARK, RED = QColor("#c8aa6e"), QColor("#f0e6d2"), QColor("#3c0a0a"), QColor("#e53935")
 SEGMENTS = [QColor("#43a047")] * 3 + [QColor("#fdd835")] * 2 + [RED] * 3
@@ -24,7 +24,7 @@ def draw(p: QPainter, s: int):
     p.setBrush(g); p.setPen(QPen(GOLD, s * .035))
     p.drawRoundedRect(QRectF(m, m, s - 2 * m, s - 2 * m), s * .2, s * .2)
 
-    cx, cy, r = s / 2, s * .55, s * .36
+    cx, cy, r = s / 2, s * .68, s * .42  # 半圓錶盤放大並垂直置中
     p.setPen(QPen(GOLD, s * .03)); p.setBrush(QColor("#1e1e24"))
     dial = QPainterPath(); dial.moveTo(cx - r, cy)
     dial.arcTo(QRectF(cx - r, cy - r, 2 * r, 2 * r), 180, -180); dial.closeSubpath()
@@ -38,10 +38,6 @@ def draw(p: QPainter, s: int):
     p.drawLine(QPointF(cx, cy), QPointF(cx + math.cos(t) * r * .95, cy - math.sin(t) * r * .95))
     p.setPen(QPen(GOLD, s * .015)); p.setBrush(DARK); p.drawEllipse(QPointF(cx, cy), s * .05, s * .05)
 
-    f = QFont("Georgia"); f.setBold(True); f.setPixelSize(max(1, int(s * .2)))
-    f.setLetterSpacing(QFont.PercentageSpacing, 110)
-    p.setFont(f); p.setPen(GOLD)
-    p.drawText(QRectF(0, s * .62, s, s * .3), Qt.AlignCenter, "LOL")
 
 
 def render(s: int) -> QImage:

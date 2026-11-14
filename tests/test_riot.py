@@ -1,6 +1,6 @@
 import time
 
-from lol_auditor.riot import RateLimiter
+from bp_auditor.riot import RateLimiter
 
 
 def test_limiter_reports_wait_when_window_is_full():

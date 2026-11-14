@@ -1,4 +1,4 @@
-"""使用者設定（API Key、本人、查詢場數等）存在 %APPDATA%\\LoL_auditor\\config.json，絕不打包進程式。"""
+"""使用者設定（API Key、本人、查詢場數等）存在 %APPDATA%\\BPAuditor\\config.json，絕不打包進程式。"""
 import json
 import os
 from dataclasses import asdict, dataclass
@@ -7,7 +7,7 @@ from pathlib import Path
 
 def config_path() -> Path:
     base = os.environ.get("APPDATA") or str(Path.home())
-    return Path(base) / "LoL_auditor" / "config.json"
+    return Path(base) / "BPAuditor" / "config.json"
 
 
 @dataclass

@@ -76,7 +76,7 @@ class RiotClient:
     def _get(self, url: str):
         for attempt in range(3):
             self._limiter.acquire()
-            req = urllib.request.Request(url, headers={"X-Riot-Token": self._key, "User-Agent": "lol-auditor"})
+            req = urllib.request.Request(url, headers={"X-Riot-Token": self._key, "User-Agent": "bp-auditor"})
             try:
                 with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                     return json.loads(resp.read().decode("utf-8"))

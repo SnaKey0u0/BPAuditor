@@ -1,5 +1,5 @@
-from lol_auditor.parsing import RiotId, parse_room_messages
-from lol_auditor.riot import find_api_key
+from bp_auditor.parsing import RiotId, parse_room_messages
+from bp_auditor.riot import find_api_key
 
 
 def test_find_api_key_in_copied_text():
@@ -27,13 +27,13 @@ def test_merges_duplicates_case_insensitively_and_collects_bad_lines():
 
 def test_clipboard_only_counts_room_join_lines():
     text = "小明: 安安\n路人 #TW2 進入組隊房間\nFaker Fan#TW2\n小雞 #0420 進入組隊房間"
-    from lol_auditor.parsing import room_members_in_clipboard
+    from bp_auditor.parsing import room_members_in_clipboard
     assert room_members_in_clipboard(text) == [RiotId("路人", "TW2"), RiotId("小雞", "0420")]
     assert room_members_in_clipboard("RGAPI-xxx") == []
 
 
 def test_room_change():
-    from lol_auditor.parsing import room_change
+    from bp_auditor.parsing import room_change
     a, b, c = RiotId("A", "1"), RiotId("B", "1"), RiotId("C", "1")
     assert room_change([], [a]) == "new"
     assert room_change([a, b], [RiotId("a", "1"), b]) == "same"
@@ -43,7 +43,7 @@ def test_room_change():
 
 
 def test_members_to_query():
-    from lol_auditor.parsing import members_to_query
+    from bp_auditor.parsing import members_to_query
     a, b = RiotId("A", "1"), RiotId("B", "1")
     assert members_to_query([a], [a, b], "grow") == [b]
     # 手動按「稽查」強制重查：名單沒變也要全部重查

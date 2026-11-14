@@ -1,5 +1,5 @@
-from lol_auditor.audit import ME, Audit, Me
-from lol_auditor.parsing import RiotId
+from bp_auditor.audit import ME, Audit, Me
+from bp_auditor.parsing import RiotId
 from tests.test_analysis import match
 
 # 4 場對戰：A、B 與本人（puuid "me"）一直同隊，C 是對手

@@ -2,7 +2,7 @@
 import sys
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-NAME = "LoL_auditor"
+NAME = "BPAuditor"
 TRAY_ARG = "--tray"
 
 

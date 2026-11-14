@@ -10,7 +10,7 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 
 def server_name() -> str:
-    return f"LoL_auditor-{getpass.getuser()}"
+    return f"BPAuditor-{getpass.getuser()}"
 
 
 def notify_running(name: str | None = None, timeout_ms: int = 500) -> bool:

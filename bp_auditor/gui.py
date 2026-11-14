@@ -1,4 +1,5 @@
 """PySide6 介面：左側欄（剪貼簿監看 / 手動貼上）+ 右側玩家卡片或設定頁，關閉時縮到系統匣。"""
+import math
 import sys
 import threading
 import time
@@ -9,7 +10,7 @@ from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, QUrl, Sig
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QGuiApplication, QIcon, QPainter
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QCompleter, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
+    QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
     QStackedWidget, QSystemTrayIcon, QToolTip, QVBoxLayout, QWidget,
 )
 
@@ -105,7 +106,11 @@ class Switch(QAbstractButton):
 
 
 class Dots(QWidget):
-    """近期戰績的勝敗方塊：自己畫，方塊才會對齊；每格有各自的提示框。"""
+    """近期戰績的勝敗方塊：自己畫，每格有各自的提示框。
+
+    以實際螢幕像素計算位置：125% 這類非整數縮放下，邏輯座標會落在半個像素上，
+    反鋸齒的淡邊會讓深淺不同的方塊看起來高低不一、間距不均。
+    """
     SIZE, GAP = 9, 2
 
     def __init__(self):
@@ -117,24 +122,40 @@ class Dots(QWidget):
         self.items = items
         self.updateGeometry(); self.update()
 
+    def _metrics(self) -> tuple[float, int, int]:
+        """(縮放比, 方塊邊長, 方塊間距)，後兩者以實際像素計。"""
+        dpr = self.devicePixelRatioF()
+        return dpr, max(round(self.SIZE * dpr), 1), max(round(self.GAP * dpr), 1)
+
     def sizeHint(self):
         n = 10 if self.items is None else len(self.items)
-        return QSize(max(n * (self.SIZE + self.GAP) - self.GAP, 0), self.SIZE + 2)
+        dpr, size, gap = self._metrics()
+        return QSize(math.ceil(max(n * (size + gap) - gap, 0) / dpr), self.SIZE + 2)
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
 
     def paintEvent(self, e):
-        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(Qt.NoPen)
-        y = (self.height() - self.SIZE) / 2
+        p = QPainter(self)
+        t = p.deviceTransform(); dpr = t.m11()
+        size, gap = max(round(self.SIZE * dpr), 1), max(round(self.GAP * dpr), 1)
+        x0 = round(t.dx()); y0 = round(t.dy() + (self.height() * dpr - size) / 2)
+
+        def rect(x: int, w: int) -> QRectF:  # 實際像素 → 邏輯座標，四邊都落在整數像素上
+            return QRectF((x - t.dx()) / dpr, (y0 - t.dy()) / dpr, w / dpr, size / dpr)
+
+        p.setRenderHint(QPainter.Antialiasing); p.setPen(Qt.NoPen)
         if self.items is None:
-            p.setBrush(QColor(SKELETON)); p.drawRoundedRect(QRectF(0, y, self.width(), self.SIZE), 3, 3)
+            p.setBrush(QColor(SKELETON)); p.drawRoundedRect(rect(x0, round(self.width() * dpr)), 3, 3)
             return
         for i, (win, _) in enumerate(self.items):
             p.setBrush(QColor(GREEN if win else RED))
-            p.drawRoundedRect(QRectF(i * (self.SIZE + self.GAP), y, self.SIZE, self.SIZE), 1.5, 1.5)
+            p.drawRoundedRect(rect(x0 + i * (size + gap), size), 1.5, 1.5)
 
     def event(self, e):
         if e.type() == QEvent.ToolTip and self.items:
-            i = int(e.pos().x() // (self.SIZE + self.GAP))
+            dpr, size, gap = self._metrics()
+            i = int(e.pos().x() * dpr // (size + gap))
             if 0 <= i < len(self.items):
                 QToolTip.showText(e.globalPos(), self.items[i][1], self)
             else:
@@ -160,7 +181,7 @@ class PlayerCard(QFrame):
         g.addWidget(self.big, 2, 0, 2, 1)
         self.kda = QLabel(); g.addWidget(self.kda, 2, 1)
         self.dots = Dots()
-        g.addWidget(self.dots, 3, 1, alignment=Qt.AlignLeft)
+        g.addWidget(self.dots, 3, 1, 1, 2, alignment=Qt.AlignLeft)  # 跨到右欄：20 場才放得下
         self.champ = QLineEdit(); self.champ.setPlaceholderText("查詢特定英雄"); self.champ.setFixedWidth(130)
         self.champ.textChanged.connect(self.update_champion)
         g.addWidget(self.champ, 0, 2, alignment=Qt.AlignRight)
@@ -332,7 +353,7 @@ class SettingsPage(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("LoL 戰績稽查器")
+        self.setWindowTitle("血壓稽查器")
         self.setWindowIcon(app_icon())
         self.resize(720, 600)
         self.cfg = Config.load()
@@ -430,7 +451,7 @@ class MainWindow(QMainWindow):
 
     def _build_tray(self):
         self.tray = QSystemTrayIcon(app_icon(), self)
-        self.tray.setToolTip("LoL 戰績稽查器")
+        self.tray.setToolTip("血壓稽查器")
         menu = QMenu()
         show = QAction("顯示", self); show.triggered.connect(self.show_window)
         quit_ = QAction("結束", self); quit_.triggered.connect(self.quit)
@@ -791,7 +812,11 @@ def main():
     app = QApplication(sys.argv)
     app.setStyleSheet(QSS)
     app.setQuitOnLastWindowClosed(False)
-    if single.notify_running():  # 已經開著：叫出那個視窗就好
+    if single.notify_running():  # 已經開著：叫出那個視窗並通知使用者
+        if autostart.TRAY_ARG not in sys.argv:
+            box = QMessageBox(QMessageBox.Information, "血壓稽查器", "血壓稽查器已在執行")
+            box.setWindowIcon(app_icon()); box.addButton("確定", QMessageBox.AcceptRole)
+            box.exec()
         return
     instance = single.SingleInstance()
     w = MainWindow()

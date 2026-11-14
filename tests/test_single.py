@@ -2,7 +2,7 @@ import uuid
 
 from PySide6.QtCore import QCoreApplication, QEventLoop, QTimer
 
-from lol_auditor.single import SingleInstance, notify_running
+from bp_auditor.single import SingleInstance, notify_running
 
 
 def test_second_instance_asks_first_to_show():

@@ -1,4 +1,4 @@
-from lol_auditor.analysis import champion_stats, detect_premades, find_encounter, recent_stats
+from bp_auditor.analysis import champion_stats, detect_premades, find_encounter, recent_stats
 
 
 def match(mid, team100, team200, *, win100=True, champ="Ahri", kda=(2, 1, 3)):
