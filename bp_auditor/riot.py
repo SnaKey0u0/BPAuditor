@@ -23,7 +23,7 @@ def find_api_key(text: str) -> str | None:
 
 
 class RiotError(Exception):
-    """kind: 'key'（Key 無效或過期）、'not_found'、'network'、'server'。"""
+    """kind: 'key'（Key 無效或過期）、'not_found'、'bad_request'（例如別把 Key 的 PUUID）、'network'、'server'。"""
 
     def __init__(self, kind: str, message: str):
         super().__init__(message)
@@ -88,6 +88,8 @@ class RiotClient:
                     raise RiotError("key", f"API Key 無法使用（HTTP {e.code}）。新 Key 有時要 1–2 分鐘才生效。") from e
                 if e.code == 404:
                     raise RiotError("not_found", "查無此人") from e
+                if e.code == 400:
+                    raise RiotError("bad_request", f"Riot 拒絕這個請求（HTTP 400）") from e
                 if e.code == 429:  # 伺服器端限流（例如同一把 Key 在別處也在用）
                     self._limiter.block_for(float(e.headers.get("Retry-After", "2")))
                     continue

@@ -49,3 +49,12 @@ def test_members_to_query():
     # 手動按「稽查」強制重查：名單沒變也要全部重查
     assert members_to_query([a, b], [a, b], "new") == [a, b]
     assert members_to_query([a, b], [a, b], "same") == []
+
+
+def test_strips_invisible_bidi_marks_copied_from_game_chat():
+    """遊戲聊天室複製出來的名字與標籤前後包著 U+2066（LRI）／U+2069（PDI），不去掉會查無此人。"""
+    text = ("⁦⁦測試玩家 甲⁩ #⁦0001⁩⁩ 進入組隊房間\r\n"
+            "⁦⁦テスト玩家乙⁩ #⁦標籤⁩⁩ 進入組隊房間")
+    from bp_auditor.parsing import room_members_in_clipboard
+    assert room_members_in_clipboard(text) == [RiotId("測試玩家 甲", "0001"), RiotId("テスト玩家乙", "標籤")]
+    assert RiotId.parse("⁦測試玩家 甲⁩#⁦0001⁩") == RiotId("測試玩家 甲", "0001")

@@ -24,6 +24,7 @@ class Config:
         key = key.strip()
         if key != self.api_key:
             self.api_key, self.key_saved_at = key, now
+            self.my_puuid = ""  # PUUID 依 Key 所屬產品加密，換 Key 後要重查
 
     @classmethod
     def load(cls) -> "Config":

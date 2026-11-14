@@ -72,10 +72,15 @@ class Audit:
 
     def _resolve_me(self) -> tuple[Me, list[str]]:
         """查出本人目前的 Riot ID（偵測改名）與近期對戰 id。"""
+        me = None
         if self.me.puuid:
-            current = RiotId(*self.client.riot_id_of(self.me.puuid))
-            me = Me(current, self.me.puuid)
-        else:
+            try:
+                me = Me(RiotId(*self.client.riot_id_of(self.me.puuid)), self.me.puuid)
+            except RiotError as e:
+                # PUUID 依 Key 所屬產品加密：換 Key（例如改用 Personal Key）後舊 PUUID 解不開，改用 Riot ID 重查
+                if e.kind not in ("bad_request", "not_found") or not self.me.riot_id:
+                    raise
+        if me is None:
             rid = self.me.riot_id
             me = Me(rid, self.client.account_puuid(rid.name, rid.tag))
         if me.riot_id != self.me.riot_id or me.puuid != self.me.puuid:

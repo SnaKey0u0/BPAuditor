@@ -1,8 +1,14 @@
 """把使用者貼上的房間訊息解析成 Riot ID 清單。"""
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 _LINE = re.compile(r"^\s*(?P<name>.+?)\s*#\s*(?P<tag>[^\s#]+)\s*(?:進入組隊房間.*)?$")
+
+
+def _visible(text: str) -> str:
+    """去掉看不見的格式字元（Unicode 類別 Cf）：遊戲聊天室複製出來的名字與標籤前後包著 U+2066／U+2069。"""
+    return "".join(c for c in text if unicodedata.category(c) != "Cf")
 
 
 @dataclass(frozen=True)
@@ -15,7 +21,7 @@ class RiotId:
 
     @classmethod
     def parse(cls, text: str) -> "RiotId | None":
-        m = _LINE.match(text or "")
+        m = _LINE.match(_visible(text or ""))
         return cls(m["name"], m["tag"]) if m else None
 
     def same_as(self, other: "RiotId") -> bool:
