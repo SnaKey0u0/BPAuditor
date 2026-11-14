@@ -292,6 +292,9 @@ class SettingsPage(QWidget):
         row = QHBoxLayout(); row.addWidget(self.key_state, 1); row.addWidget(upd)
         f.addRow("", row)
         f.addRow("", QLabel(grey("在網站複製 Key，程式會自動存入")))
+        self.personal = Switch("Personal Key（不會過期）"); self.personal.setChecked(cfg.personal_key)
+        self.personal.toggled.connect(self.save_personal)
+        f.addRow("", self.personal)
 
         self.me = QLineEdit(cfg.my_riot_id); self.me.setPlaceholderText("名稱#標籤")
         self.me.editingFinished.connect(self.save_me)
@@ -346,6 +349,10 @@ class SettingsPage(QWidget):
     def update_games_hint(self):
         n = self.games.value()
         self.games_hint.setText(grey(f"5 人房最多約 {4 * n + 10} 次請求。開發 Key 上限每 2 分鐘 100 次。"))
+
+    def save_personal(self, on: bool):
+        self.win.cfg.personal_key = on; self.win.cfg.save()
+        self.win.update_key_status()
 
     def save_autostart(self, on: bool):
         self.win.cfg.autostart = on; self.win.cfg.save()
@@ -509,7 +516,7 @@ class MainWindow(QMainWindow):
             text = f"<span style='color:{RED}'>Key 無法使用</span>"
         else:
             left = DEV_KEY_LIFETIME - (time.time() - self.cfg.key_saved_at)
-            if not self.cfg.key_saved_at:
+            if self.cfg.personal_key or not self.cfg.key_saved_at:
                 text = grey("Key 已設定")
             elif left <= 0:
                 text = f"<span style='color:{RED}'>Key 可能過期了</span>"
