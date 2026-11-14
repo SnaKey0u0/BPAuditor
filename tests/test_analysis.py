@@ -1,4 +1,4 @@
-from bp_auditor.analysis import champion_stats, detect_premades, find_encounter, recent_stats
+from bp_auditor.analysis import detect_premades, find_encounter, mastery, ranks, recent_stats, split_game
 
 
 def match(mid, team100, team200, *, win100=True, champ="Ahri", kda=(2, 1, 3)):
@@ -16,12 +16,6 @@ def test_recent_stats():
     s = recent_stats("a", ms)
     assert (s.games, s.wins, s.results, s.level) == (2, 1, [True, False], 100)
     assert s.kda == 5.0
-
-
-def test_champion_stats_case_insensitive():
-    ms = [match("1", ["a"], [], champ="Ahri"), match("2", ["a"], [], champ="Lux")]
-    assert champion_stats("a", ms, "ahri").games == 1
-    assert champion_stats("a", ms, "Zed").games == 0
 
 
 def test_premade_streak_from_most_recent():
@@ -81,3 +75,30 @@ def test_groups_bridged_by_one_pair_merged():
          + [(f"q{i}", ["B", "C"]) for i in range(3)])
     groups = detect_premades(_histories(g, "ABCDE"))
     assert [g.members for g in groups] == [["A", "B", "C", "D"]]
+
+
+def test_ranks_by_queue_and_format():
+    rs = ranks([{"queueType": "RANKED_SOLO_5x5", "tier": "GOLD", "rank": "II", "leaguePoints": 45, "wins": 10, "losses": 8},
+                {"queueType": "RANKED_FLEX_SR", "tier": "MASTER", "rank": "I", "leaguePoints": 120},
+                {"queueType": "CHERRY", "tier": "GOLD", "rank": "I"}])
+    assert {q: str(r) for q, r in rs.items()} == {"單雙": "金 II 45LP", "彈性": "大師 120LP"}
+    assert ranks([]) == {}
+
+
+def test_mastery_none_when_never_played():
+    assert mastery(None) is None
+    m = mastery({"championLevel": 7, "championPoints": 123456, "lastPlayTime": 1_700_000_000_000})
+    assert (m.level, m.points, m.last_play) == (7, 123456, 1_700_000_000)
+
+
+def test_split_game_keeps_hidden_players_and_skips_bots():
+    game = {"participants": [
+        {"puuid": "me", "teamId": 100, "riotId": "我#TW2", "championId": 103},
+        {"puuid": "a", "teamId": 100, "riotId": "A#1", "championId": 1},
+        {"puuid": "x", "teamId": 200, "riotId": "X#1", "championId": 2},
+        {"puuid": None, "teamId": 100, "riotId": "Soraka", "championId": 16, "bot": False},  # 身分被隱藏
+        {"puuid": "", "teamId": 200, "riotId": "", "championId": 3, "bot": True}]}
+    allies, enemies = split_game(game, "me")
+    assert [(p.label, p.puuid, p.champion_key) for p in allies] == [("我#TW2", "me", 103), ("A#1", "a", 1),
+                                                                      ("Soraka", "", 16)]
+    assert [p.label for p in enemies] == ["X#1"]

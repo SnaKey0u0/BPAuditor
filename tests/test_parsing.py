@@ -32,6 +32,15 @@ def test_clipboard_only_counts_room_join_lines():
     assert room_members_in_clipboard("RGAPI-xxx") == []
 
 
+def test_hidden_player_without_tag_is_kept_as_hidden_member():
+    """身分被隱藏的玩家在房間訊息只有化名，沒有 #標籤。"""
+    from bp_auditor.parsing import room_members_in_clipboard
+    ms = room_members_in_clipboard("小雞 #0420 進入組隊房間\n⁦河蟹⁩ 進入組隊房間")
+    assert ms == [RiotId("小雞", "0420"), RiotId("河蟹", "")]
+    assert [m.hidden for m in ms] == [False, True] and str(ms[1]) == "河蟹"
+    assert parse_room_messages("沒有標籤的亂貼").bad_lines == ["沒有標籤的亂貼"]
+
+
 def test_room_change():
     from bp_auditor.parsing import room_change
     a, b, c = RiotId("A", "1"), RiotId("B", "1"), RiotId("C", "1")

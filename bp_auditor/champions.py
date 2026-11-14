@@ -14,9 +14,11 @@ def _get(url):
 
 
 class Champions:
-    def __init__(self, id_to_name: dict[str, str] | None = None, version: str = ""):
+    def __init__(self, id_to_name: dict[str, str] | None = None, version: str = "",
+                 key_to_id: dict[int, str] | None = None):
         self.id_to_name = id_to_name or {}
         self.version = version
+        self.key_to_id = key_to_id or {}  # 觀戰／熟練度 API 用數字 key（例如 103 = Ahri）
         self._name_to_id = {}
         for cid, name in self.id_to_name.items():
             self._name_to_id[name] = cid
@@ -26,7 +28,8 @@ class Champions:
     def load(cls) -> "Champions":
         version = _get(f"{DDRAGON}/api/versions.json")[0]
         data = _get(f"{DDRAGON}/cdn/{version}/data/zh_TW/champion.json")["data"]
-        return cls({c["id"]: c["name"] for c in data.values()}, version)
+        return cls({c["id"]: c["name"] for c in data.values()}, version,
+                   {int(c["key"]): c["id"] for c in data.values()})
 
     def canonical(self, champion_id: str) -> str:
         """match-v5 的 championName（大小寫可能不同）→ Data Dragon 的英雄 id。"""
@@ -35,13 +38,9 @@ class Champions:
     def name(self, champion_id: str) -> str:
         return self.id_to_name.get(self.canonical(champion_id), champion_id)
 
-    def lookup(self, text: str) -> str | None:
-        """中文名或英文 id → 英雄 id。"""
-        t = text.strip()
-        return self._name_to_id.get(t) or self._name_to_id.get(t.casefold())
-
-    def names(self) -> list[str]:
-        return sorted(self.id_to_name.values())
+    def by_key(self, key: int) -> str | None:
+        """數字 key → 英雄 id；英雄資料還沒載入時回 None。"""
+        return self.key_to_id.get(key)
 
 
 def icon_dir() -> Path:

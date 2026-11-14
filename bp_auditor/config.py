@@ -15,7 +15,7 @@ class Config:
     api_key: str = ""
     my_riot_id: str = ""
     my_puuid: str = ""  # 本人以 PUUID 認定，改名後 PUUID 不變
-    recent_games: int = 10
+    recent_games: int = 5
     autostart: bool = False
     key_saved_at: float = 0.0  # epoch 秒；開發 Key 產生後 24 小時過期，以存入時間估算
     personal_key: bool = False  # Personal API Key 不會過期，不顯示倒數；字串上和開發 Key 分不出來，由使用者勾選

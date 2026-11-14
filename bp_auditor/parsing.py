@@ -3,6 +3,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
+ROOM_JOIN = "進入組隊房間"
 _LINE = re.compile(r"^\s*(?P<name>.+?)\s*#\s*(?P<tag>[^\s#]+)\s*(?:進入組隊房間.*)?$")
 
 
@@ -17,7 +18,12 @@ class RiotId:
     tag: str
 
     def __str__(self):
-        return f"{self.name}#{self.tag}"
+        return f"{self.name}#{self.tag}" if self.tag else self.name
+
+    @property
+    def hidden(self) -> bool:
+        """身分被 Riot 隱藏的玩家：房間訊息只有化名、沒有 #標籤，無法查詢。"""
+        return not self.tag
 
     @classmethod
     def parse(cls, text: str) -> "RiotId | None":
@@ -35,20 +41,23 @@ class ParseResult:
 
 
 def parse_room_messages(text: str) -> ParseResult:
-    """每行 `<遊戲名稱> #<標籤> 進入組隊房間`；也接受只有 `名稱#標籤`。重複者合併，壞行收集起來。"""
+    """每行 `<遊戲名稱> #<標籤> 進入組隊房間`；也接受只有 `名稱#標籤`。重複者合併，壞行收集起來。
+
+    `<化名> 進入組隊房間`（沒有標籤）是身分被隱藏的玩家，以標籤為空的 RiotId 表示。
+    """
     result = ParseResult()
     for line in text.splitlines():
         if not line.strip():
             continue
         rid = RiotId.parse(line)
+        if rid is None and ROOM_JOIN in line and "#" not in line:
+            name = _visible(line.split(ROOM_JOIN)[0]).strip()
+            rid = RiotId(name, "") if name else None
         if rid is None:
             result.bad_lines.append(line.strip())
         elif not any(rid.same_as(m) for m in result.members):
             result.members.append(rid)
     return result
-
-
-ROOM_JOIN = "進入組隊房間"
 
 
 def room_members_in_clipboard(text: str) -> list[RiotId]:

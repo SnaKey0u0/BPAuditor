@@ -1,18 +1,21 @@
-"""一次稽查的流程：並行查房間成員，查完一人回報一人，最後回報疑似多排。
+"""一次稽查的流程：並行查房間成員，查完一人回報一人，最後回報可能多排。
 
 同一房間多了新人時，只查新的人（`query`），舊成員的近期戰績由 `prior` 帶入，只存在記憶體。
+進遊戲後查對面也走同一個流程：`room` 是兩隊全部，`sides` 讓可能多排分隊判斷，
+`puuids` 是觀戰 API 已給的 PUUID（不必再查帳號），`champions` 是本場英雄（查熟練度用）。
 """
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .analysis import Encounter, PremadeGroup, RecentStats, detect_premades, find_encounter, recent_stats
+from .analysis import (Encounter, Mastery, PremadeGroup, Rank, RecentStats, detect_premades, find_encounter,
+                       mastery, ranks, recent_stats)
 from .parsing import RiotId
 from .riot import RiotClient, RiotError
 
-DEFAULT_GAMES = 10
-ME = "你"  # 疑似多排群組中代表本人的標籤
+DEFAULT_GAMES = 5
+ME = "你"  # 可能多排群組中代表本人的標籤
 
 History = tuple[str, list[dict]]  # (puuid, 近期戰績)
 
@@ -31,8 +34,10 @@ class PlayerResult:
     matches: list[dict] | None = None
     stats: RecentStats | None = None
     encounter: Encounter | None = None
+    ranks: dict[str, Rank] | None = None  # None = 查不到；{} = 沒有定級
+    mastery: Mastery | None = None        # 本場英雄的熟練度；只在遊戲中查
     error: RiotError | None = None
-    is_me: bool = False  # 本人改名後以新名字出現在房間時，查完才知道是本人
+    is_me: bool = False  # 本人也有卡片；改名後以新名字出現在房間時，查完才知道是本人
 
 
 @dataclass
@@ -44,14 +49,19 @@ class AuditOutcome:
 class Audit:
     def __init__(self, client: RiotClient, room: list[RiotId], me: Me, games: int = DEFAULT_GAMES, *,
                  query: list[RiotId] | None = None, prior: dict[str, History] | None = None,
+                 puuids: dict[str, str] | None = None, champions: dict[str, int] | None = None,
+                 sides: list[list[str]] | None = None,
                  on_player: Callable[[PlayerResult], None] = lambda r: None,
                  on_me: Callable[[Me], None] = lambda m: None,
                  on_outcome: Callable[[AuditOutcome], None] = lambda o: None,
+                 on_mastery: Callable[[str, Mastery | None], None] = lambda label, m: None,
                  on_done: Callable[[], None] = lambda: None):
         self.client, self.room, self.me, self.games = client, room, me, games
         self.query = room if query is None else query
         self.prior = dict(prior or {})
+        self.puuids, self.champions, self.sides = puuids or {}, champions or {}, sides
         self.on_player, self.on_me, self.on_outcome, self.on_done = on_player, on_me, on_outcome, on_done
+        self.on_mastery = on_mastery
         self._match_pool = ThreadPoolExecutor(max_workers=10)
         self._matches: dict[str, Future] = {}
         self._lock = threading.Lock()
@@ -66,9 +76,12 @@ class Audit:
     def _fetch(self, ids: list[str]) -> list[dict]:
         return [f.result() for f in [self._match(mid) for mid in ids]]
 
-    def _history(self, rid: RiotId) -> tuple[str, list[dict]]:
-        puuid = self.client.account_puuid(rid.name, rid.tag)
-        return puuid, self._fetch(self.client.match_ids(puuid, self.games))
+    def _player(self, rid: RiotId) -> tuple[str, list[dict], dict[str, Rank] | None, Mastery | None]:
+        """(puuid, 近期戰績, 牌位, 本場英雄熟練度)。"""
+        puuid = self.puuids.get(str(rid)) or self.client.account_puuid(rid.name, rid.tag)
+        futures = [self._match(mid) for mid in self.client.match_ids(puuid, self.games)]
+        rank, mast = self._ranks(puuid), self._mastery(str(rid), puuid)  # 對戰在背景下載時順便查
+        return puuid, [f.result() for f in futures], rank, mast
 
     def _resolve_me(self) -> tuple[Me, list[str]]:
         """查出本人目前的 Riot ID（偵測改名）與近期對戰 id。"""
@@ -87,6 +100,24 @@ class Audit:
             self.on_me(me)
         return me, self.client.match_ids(me.puuid, self.games)
 
+    def _ranks(self, puuid: str) -> dict[str, Rank] | None:
+        try:
+            return ranks(self.client.league_entries(puuid))
+        except RiotError:
+            return None  # 牌位查不到不影響戰績
+
+    def _mastery(self, label: str, puuid: str) -> Mastery | None:
+        if label not in self.champions:
+            return None
+        try:
+            return mastery(self.client.champion_mastery(puuid, self.champions[label]))
+        except RiotError:
+            return None
+
+    def _prior_mastery(self, label: str):
+        """之前已查過戰績的人（例如房間成員進了遊戲）只補查本場英雄的熟練度。"""
+        self.on_mastery(label, self._mastery(label, self.puuids.get(label) or self.prior[label][0]))
+
     def run(self):
         """阻塞執行；請在背景執行緒呼叫。"""
         try:
@@ -99,7 +130,10 @@ class Audit:
         has_me = bool(self.me.puuid or self.me.riot_id)
         with ThreadPoolExecutor(max_workers=6) as pool:
             me_future = pool.submit(self._resolve_me) if has_me else None
-            futures = {pool.submit(self._history, m): m for m in self.query}
+            futures = {pool.submit(self._player, m): m for m in self.query}
+            queried = {str(m) for m in self.query}
+            extra = [pool.submit(self._prior_mastery, l) for l in self.champions
+                     if l not in queried and (l in self.puuids or l in self.prior)]
 
             def me_now() -> tuple[Me, list[str]] | None:
                 try:
@@ -113,7 +147,7 @@ class Audit:
                 m = futures[f]
                 r = PlayerResult(m)
                 try:
-                    r.puuid, r.matches = f.result()
+                    r.puuid, r.matches, r.ranks, r.mastery = f.result()
                     r.stats = recent_stats(r.puuid, r.matches)
                     if r.stats.level is None:
                         r.stats.level = self.client.summoner_level(r.puuid)
@@ -128,6 +162,8 @@ class Audit:
                 except RiotError as e:
                     r.error = e
                 self.on_player(r)
+            for f in extra:
+                f.result()
 
             mine = me_now()
             labels = [str(m) for m in self.room]
@@ -144,4 +180,6 @@ class Audit:
                             pass
                     if me_history:
                         histories[ME] = me_history
-        self.on_outcome(AuditOutcome(detect_premades(histories), histories))
+        sides = self.sides or [list(histories)]
+        premades = [g for side in sides for g in detect_premades({l: histories[l] for l in side if l in histories})]
+        self.on_outcome(AuditOutcome(premades, histories))

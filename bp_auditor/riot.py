@@ -124,3 +124,25 @@ class RiotClient:
 
     def match(self, match_id: str) -> dict:
         return self._get(f"{MATCH_HOST}/lol/match/v5/matches/{match_id}")
+
+    def league_entries(self, puuid: str) -> list[dict]:
+        return self._get(f"{PLATFORM_HOST}/lol/league/v4/entries/by-puuid/{puuid}")
+
+    def champion_mastery(self, puuid: str, champion_key: int) -> dict | None:
+        """沒玩過這隻英雄時 Riot 回 404，這裡回 None。"""
+        try:
+            return self._get(f"{PLATFORM_HOST}/lol/champion-mastery/v4/champion-masteries/by-puuid/{puuid}"
+                             f"/by-champion/{champion_key}")
+        except RiotError as e:
+            if e.kind == "not_found":
+                return None
+            raise
+
+    def active_game(self, puuid: str) -> dict | None:
+        """本人進行中的對局（載入畫面開始才有）；不在遊戲中時回 None。"""
+        try:
+            return self._get(f"{PLATFORM_HOST}/lol/spectator/v5/active-games/by-summoner/{puuid}")
+        except RiotError as e:
+            if e.kind == "not_found":
+                return None
+            raise

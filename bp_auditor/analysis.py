@@ -1,4 +1,4 @@
-"""純函式：從 match-v5 對戰資料算出近期戰績、指定英雄戰績、疑似多排、相遇。
+"""純函式：從 Riot API 的回應算出近期戰績、牌位、英雄熟練度、可能多排、相遇，以及拆開進行中對局的兩隊。
 
 所有 `matches` 參數都是「新 → 舊」排序的 match-v5 對戰 dict 清單。
 """
@@ -47,18 +47,62 @@ def recent_stats(puuid: str, matches: list[dict]) -> RecentStats:
     )
 
 
+TIERS = {"IRON": "鐵", "BRONZE": "銅", "SILVER": "銀", "GOLD": "金", "PLATINUM": "白金", "EMERALD": "翡翠",
+         "DIAMOND": "鑽石", "MASTER": "大師", "GRANDMASTER": "宗師", "CHALLENGER": "菁英"}
+RANK_QUEUES = {"RANKED_SOLO_5x5": "單雙", "RANKED_FLEX_SR": "彈性"}
+
+
 @dataclass
-class ChampionStats:
-    games: int
+class Rank:
+    tier: str      # 例如 "GOLD"
+    division: str  # "I"–"IV"；大師以上沒有分級
+    lp: int
     wins: int
-    kda: float
+    losses: int
+
+    def __str__(self):
+        name = TIERS.get(self.tier, self.tier)
+        div = "" if self.tier in ("MASTER", "GRANDMASTER", "CHALLENGER") else f" {self.division}"
+        return f"{name}{div} {self.lp}LP"
 
 
-def champion_stats(puuid: str, matches: list[dict], champion_id: str) -> ChampionStats:
-    """champion_id 為 Data Dragon 的英雄 id（如 'Ahri'），比對時不分大小寫。"""
-    cid = champion_id.casefold()
-    ps = [p for m in matches if (p := participant(m, puuid)) and p["championName"].casefold() == cid]
-    return ChampionStats(len(ps), sum(p["win"] for p in ps), _kda(ps))
+def ranks(entries: list[dict]) -> dict[str, Rank]:
+    """league-v4 entries → 佇列名稱（單雙、彈性）→ 牌位；沒有定級的佇列不會出現。"""
+    return {RANK_QUEUES[e["queueType"]]: Rank(e["tier"], e.get("rank", ""), e.get("leaguePoints", 0),
+                                              e.get("wins", 0), e.get("losses", 0))
+            for e in entries if e.get("queueType") in RANK_QUEUES}
+
+
+@dataclass
+class Mastery:
+    level: int
+    points: int
+    last_play: float  # epoch 秒
+
+
+def mastery(entry: dict | None) -> Mastery | None:
+    """champion-mastery-v4 的單一英雄熟練度；None 代表沒玩過。"""
+    if not entry:
+        return None
+    return Mastery(entry.get("championLevel", 0), entry.get("championPoints", 0), entry.get("lastPlayTime", 0) / 1000)
+
+
+@dataclass
+class GamePlayer:
+    label: str        # Riot ID 字串「名稱#標籤」
+    puuid: str         # 空字串 = Riot 隱藏了此人身分（觀戰資料沒有 PUUID，Riot ID 只寫英雄名），無法查詢
+    champion_key: int  # Data Dragon 的英雄數字 key
+
+
+def split_game(game: dict, me_puuid: str) -> tuple[list[GamePlayer], list[GamePlayer]]:
+    """spectator-v5 的進行中對局 → (我方, 對面)，我方含本人；電腦玩家略過，身分被隱藏的玩家保留（puuid 為空）。"""
+    ps = [p for p in game.get("participants", []) if not p.get("bot")]
+    my_team = next((p["teamId"] for p in ps if p["puuid"] == me_puuid), None)
+    allies, enemies = [], []
+    for p in ps:
+        gp = GamePlayer(p.get("riotId", ""), p.get("puuid") or "", p.get("championId", 0))
+        (allies if p["teamId"] == my_team else enemies).append(gp)
+    return allies, enemies
 
 
 @dataclass
