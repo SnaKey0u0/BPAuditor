@@ -1,5 +1,5 @@
-from bp_auditor.analysis import (detect_premades, find_encounter, game_summaries, mastery, ranks, recent_stats,
-                                 split_game)
+from bp_auditor.analysis import (STREAK_MIN, detect_premades, find_encounter, game_summaries, mastery, ranks,
+                                 recent_stats, split_game, streak)
 
 
 def match(mid, team100, team200, *, win100=True, champ="Ahri", kda=(2, 1, 3), queue=450, mode="ARAM",
@@ -64,6 +64,36 @@ def test_game_summaries_mode_from_queue_falling_back_to_game_mode():
 def test_game_summaries_flag_remake_but_not_normal_surrender():
     ms = [match("1", ["a"], ["x"], remake=True), match("2", ["a"], ["x"], surrender=True), match("3", ["a"], ["x"])]
     assert [g.remake for g in game_summaries("a", ms)] == [True, False, False]
+
+
+def _games(*results):
+    """results：新 → 舊，'W' 贏、'L' 輸、'R' 重開局 → 玩家 a 的單場摘要。"""
+    return game_summaries("a", [match(str(i), ["a"], ["x"], win100=r == "W", remake=r == "R")
+                                for i, r in enumerate(results)])
+
+
+def test_streak_of_2_not_reported_3_reported_with_count_and_direction():
+    assert STREAK_MIN == 3
+    assert streak(_games("W", "W", "L", "W")) is None
+    assert streak(_games("L", "L", "W")) is None
+    s = streak(_games("W", "W", "W", "L", "W"))
+    assert (s.win, s.games) == (True, 3)
+    s = streak(_games("L", "L", "L", "L", "W"))
+    assert (s.win, s.games) == (False, 4)
+
+
+def test_streak_remake_in_losing_streak_neither_breaks_nor_counts():
+    s = streak(_games("L", "R", "L", "L", "W"))
+    assert (s.win, s.games) == (False, 3)
+    s = streak(_games("R", "L", "L", "R", "W"))
+    assert s is None
+
+
+def test_streak_all_wins_counts_every_game_and_none_without_games():
+    s = streak(_games("W", "R", "W", "W", "W", "W"))
+    assert (s.win, s.games) == (True, 5)
+    assert streak([]) is None
+    assert streak(_games("R", "R", "R")) is None
 
 
 def test_premade_streak_from_most_recent():
