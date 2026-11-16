@@ -23,11 +23,16 @@ def _kda(ps: list[dict]) -> float:
     return (k + a) / max(d, 1)
 
 
+def _kd(ps: list[dict]) -> float:
+    return sum(p["kills"] for p in ps) / max(sum(p["deaths"] for p in ps), 1)
+
+
 @dataclass
 class RecentStats:
     games: int
     wins: int
     kda: float
+    kd: float
     results: list[bool]  # 新 → 舊
     level: int | None
 
@@ -42,6 +47,7 @@ def recent_stats(puuid: str, matches: list[dict]) -> RecentStats:
         games=len(ps),
         wins=sum(p["win"] for p in ps),
         kda=_kda(ps),
+        kd=_kd(ps),
         results=[p["win"] for p in ps],
         level=ps[0].get("summonerLevel") if ps else None,
     )

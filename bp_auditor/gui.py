@@ -248,7 +248,7 @@ class PlayerCard(QFrame):
 
     def set_skeleton(self):
         """查詢中：灰色佔位方塊。"""
-        for w, size in ((self.big, (100, 24)), (self.kda, (64, 18))):
+        for w, size in ((self.big, (100, 24)), (self.kda, (110, 18))):
             w.setFixedSize(*size); w.setStyleSheet(f"background:{SKELETON};border-radius:4px;")
         self.dots.set_items(None)
 
@@ -278,7 +278,7 @@ class PlayerCard(QFrame):
         if s.games:
             self.big.setText(f"<span style='font-size:20px;color:{wr_color(s.win_rate)}'>{round(s.win_rate * 100)}%</span>"
                              f" {grey(f'{s.wins}勝{s.games - s.wins}敗')}")
-            self.kda.setText(f"<span style='font-size:15px'>KDA {s.kda:.1f}</span>")
+            self.kda.setText(f"<span style='font-size:15px'>KDA {s.kda:.1f}</span> {grey(f'KD {s.kd:.1f}')}")
             self.dots.set_items([(p["win"], self._dot_tip(m, p)) for m in r.matches
                                  if (p := participant(m, r.puuid))])
         else:

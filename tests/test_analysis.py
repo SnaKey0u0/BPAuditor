@@ -16,6 +16,7 @@ def test_recent_stats():
     s = recent_stats("a", ms)
     assert (s.games, s.wins, s.results, s.level) == (2, 1, [True, False], 100)
     assert s.kda == 5.0
+    assert s.kd == 2.0
 
 
 def test_premade_streak_from_most_recent():
