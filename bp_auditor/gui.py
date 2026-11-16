@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import autostart, single
-from .analysis import GameSummary, Mastery, PremadeGroup, detect_premades, game_summaries, split_game
+from .analysis import GameSummary, Mastery, PremadeGroup, detect_premades, game_summaries, split_game, streak
 from .audit import ME, Audit, AuditOutcome, Me, PlayerResult
 from .champions import Champions, download_icon, icon_path
 from .config import Config
@@ -304,8 +304,9 @@ class PlayerCard(QFrame):
         v.addWidget(self.champ)
 
         self.tags = QHBoxLayout(); self.tags.setSpacing(6)
+        self.streak = QLabel(); self.streak.hide()  # 連勝／連敗
         self.chip = QLabel(); self.chip.hide()
-        self.tags.addWidget(self.chip); self.tags.addStretch()
+        self.tags.addWidget(self.streak); self.tags.addWidget(self.chip); self.tags.addStretch()
         v.addLayout(self.tags)
         self.bottom = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Minimum)
         v.addItem(self.bottom)
@@ -354,6 +355,7 @@ class PlayerCard(QFrame):
         self.result = r
         self.clear_skeleton()
         self.tiles.set_games([])
+        self.streak.hide()
         self.show_champion()
         if r.error:
             if r.error.kind == "key":
@@ -373,7 +375,13 @@ class PlayerCard(QFrame):
             self.kda.setText(kda_html(s.kda, s.kd))
         else:
             self.big.setText(grey("近期沒有對戰")); self.kda.setText("")
-        self.tiles.set_games(game_summaries(r.puuid, r.matches))  # 全是重開局時統計為空，方塊仍列出
+        games = game_summaries(r.puuid, r.matches)
+        self.tiles.set_games(games)  # 全是重開局時統計為空，方塊仍列出
+        if st := streak(games):
+            color, bg = (GREEN, "#2e4a3a") if st.win else (RED, "#4a2e2e")
+            self.streak.setText(f"{'連勝' if st.win else '連敗'} {st.games}")
+            self.streak.setStyleSheet(f"background:{bg};color:{color};border-radius:10px;padding:2px 8px;")
+            self.streak.show()
         e = r.encounter
         if e:
             when = "上一場" if e.games_ago == 0 else f"{e.games_ago + 1} 場前"
