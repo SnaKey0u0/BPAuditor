@@ -147,6 +147,31 @@ class Switch(QAbstractButton):
             p.drawText(QRectF(46, 0, self.width() - 46, self.height()), Qt.AlignVCenter, self.text())
 
 
+class FlagButton(QAbstractButton):
+    """「!」黑名單切換鈕。圓圈與驚嘆號都自己畫，不靠字型，驚嘆號才會在圓圈正中心。"""
+
+    def __init__(self):
+        super().__init__()
+        self.setCheckable(True); self.setFixedSize(24, 24); self.setCursor(Qt.PointingHandCursor)
+        self.setAttribute(Qt.WA_Hover)
+
+    def paintEvent(self, e):
+        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
+        if not self.isEnabled():
+            ring = QColor("#30343d"); mark = QColor("#4a5060"); fill = Qt.NoBrush
+        elif self.isChecked():
+            ring = QColor(RED); fill = QColor(RED); mark = QColor("#1b1e24")
+        elif self.underMouse():
+            ring = mark = QColor(RED); fill = Qt.NoBrush
+        else:
+            ring = QColor("#4a5060"); mark = QColor(GREY); fill = Qt.NoBrush
+        p.setPen(QPen(ring, 1)); p.setBrush(fill); p.drawEllipse(QRectF(0.5, 0.5, 23, 23))
+        # 驚嘆號：一條直槓加一個點，整體高 12、以 (12, 12) 為中心
+        p.setPen(Qt.NoPen); p.setBrush(mark)
+        p.drawRoundedRect(QRectF(11, 6, 2, 7.5), 1, 1)
+        p.drawEllipse(QRectF(10.75, 15.5, 2.5, 2.5))
+
+
 class ChampionTiles(QWidget):
     """近期戰績的英雄頭像方塊：由新到舊，底部綠／紅條表示該場勝敗；每場有各自的提示框。
 
@@ -308,15 +333,8 @@ class PlayerCard(QFrame):
         self.header_right = QHBoxLayout(); self.header_right.setSpacing(4)
         head.addLayout(self.header_right)
         # 「!」黑名單切換鈕：取得 PUUID 後才可按；本人與身分被隱藏的玩家不顯示
-        self.flag = QPushButton("!"); self.flag.setObjectName("flag")
-        self.flag.setCheckable(True); self.flag.setFixedSize(24, 24); self.flag.setEnabled(False)
-        self.flag.setCursor(Qt.PointingHandCursor); self.flag.clicked.connect(self.toggle_blacklist)
-        self.flag.setStyleSheet(
-            f"QPushButton{{background:transparent;border:1px solid #4a5060;border-radius:12px;padding:0;"
-            f"color:{GREY};font-weight:bold;font-size:14px;}}"
-            f"QPushButton:hover{{border-color:{RED};color:{RED};}}"
-            f"QPushButton:checked{{background:{RED};border-color:{RED};color:#1b1e24;}}"
-            f"QPushButton:disabled{{border-color:#30343d;color:#4a5060;}}")
+        self.flag = FlagButton(); self.flag.setEnabled(False)
+        self.flag.clicked.connect(self.toggle_blacklist)
         self.header_right.addWidget(self.flag, 0, Qt.AlignTop)
         v.addLayout(head)
 
@@ -564,7 +582,7 @@ class SettingsPage(QWidget):
             self.boot.setEnabled(False); self.boot.setToolTip("只有打包後的 exe 能用")
         f.addRow("開機時啟動", self.boot)
 
-        # 送頭場判定：(KDA 低於 或 KD 不高於) 且 死亡至少；改了立即存檔並重畫卡片，不重新稽查
+        # 送頭場判定：(KDA < 或 KD ≤) 且 死亡 ≥；改了立即存檔並重畫卡片，不重新稽查
         head = QLabel("<b>送頭場判定</b>"); head.setStyleSheet("padding-top:10px;"); f.addRow(head)
         self.feed_kda = QDoubleSpinBox(); self.feed_kda.setRange(0, 20); self.feed_kda.setDecimals(2)
         self.feed_kda.setSingleStep(0.1); self.feed_kda.setValue(cfg.feeding_kda_below)
@@ -572,10 +590,10 @@ class SettingsPage(QWidget):
         self.feed_kd.setSingleStep(0.05); self.feed_kd.setValue(cfg.feeding_kd_at_most)
         self.feed_deaths = QSpinBox(); self.feed_deaths.setRange(0, 50); self.feed_deaths.setSuffix(" 次")
         self.feed_deaths.setValue(cfg.feeding_min_deaths)
-        for label, box in (("KDA 低於", self.feed_kda), ("KD 不高於", self.feed_kd), ("死亡至少", self.feed_deaths)):
+        for label, box in (("KDA <", self.feed_kda), ("KD ≤", self.feed_kd), ("死亡 ≥", self.feed_deaths)):
             box.setKeyboardTracking(False); box.valueChanged.connect(self.save_feeding)
             f.addRow(label, box)
-        f.addRow("", QLabel(grey("（KDA 低於 或 KD 不高於）且 死亡至少 → 送頭場")))
+        f.addRow("", QLabel(grey("（KDA &lt; 或 KD ≤）且 死亡 ≥ → 送頭場")))
 
     def save_key(self):
         key = self.key.text().strip()
