@@ -72,6 +72,31 @@ class GameSummary:
     assists: int
     mode: str      # 佇列的顯示名稱（例如 ARAM、單雙）；不認得的佇列用 gameMode
     remake: bool = False  # 重開局：列出但不計入統計，方塊以灰色呈現
+    feeding: bool = False  # 送頭場：方塊加青色霓虹框
+
+    @property
+    def kda(self) -> float:
+        """單場 KDA，算法與近期戰績的平均相同（死亡為 0 時以 1 計）。"""
+        return (self.kills + self.assists) / max(self.deaths, 1)
+
+    @property
+    def kd(self) -> float:
+        return self.kills / max(self.deaths, 1)
+
+
+@dataclass(frozen=True)
+class FeedingThresholds:
+    """送頭場的門檻：(KDA < kda_below 或 KD ≤ kd_at_most) 且 死亡 ≥ min_deaths。"""
+    kda_below: float = 2.0
+    kd_at_most: float = 0.5
+    min_deaths: int = 10
+
+
+def is_feeding(p: dict, t: FeedingThresholds = FeedingThresholds()) -> bool:
+    """送頭場：只看該玩家自己這一場的數字；重開局永遠不是送頭場。"""
+    if is_remake(p):
+        return False
+    return (_kda([p]) < t.kda_below or _kd([p]) <= t.kd_at_most) and p["deaths"] >= t.min_deaths
 
 
 def _mode(match: dict) -> str:
@@ -79,10 +104,11 @@ def _mode(match: dict) -> str:
     return QUEUES.get(info.get("queueId"), info.get("gameMode", ""))
 
 
-def game_summaries(puuid: str, matches: list[dict]) -> list[GameSummary]:
-    """近期戰績的每一場 → 單場摘要，新 → 舊；玩家不在的對戰略過。"""
+def game_summaries(puuid: str, matches: list[dict],
+                   feeding: FeedingThresholds = FeedingThresholds()) -> list[GameSummary]:
+    """近期戰績的每一場 → 單場摘要，新 → 舊；玩家不在的對戰略過。feeding：送頭場的門檻。"""
     return [GameSummary(p["win"], p["championName"], p["kills"], p["deaths"], p["assists"], _mode(m),
-                        remake=is_remake(p))
+                        remake=is_remake(p), feeding=is_feeding(p, feeding))
             for m in matches if (p := participant(m, puuid))]
 
 
