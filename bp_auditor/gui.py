@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QGuiApplication, QIcon, QPainter, QPainterPath,
-                           QPixmap)
+                           QImage, QPixmap)
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
@@ -71,7 +71,7 @@ def grey(text: str) -> str:
 def kda_html(kda: float, kd: float) -> str:
     """平均 KDA < 3、KD < 1 紅色，否則綠色；兩者同字體大小，上下兩行。"""
     def line(label: str, value: float, good: float) -> str:
-        return f"{grey(label)} <b style='color:{GREEN if value >= good else RED}'>{value:.1f}</b>"
+        return f"{grey(label)} <b style='color:{GREEN if value >= good else RED}'>{value:.2f}</b>"
     return f"<span style='font-size:15px'>{line('KDA', kda, KDA_GOOD)}<br>{line('KD', kd, KD_GOOD)}</span>"
 
 
@@ -207,7 +207,8 @@ class ChampionTiles(QWidget):
         n = self._count()
         return self._extent(math.ceil(n / self._per_row(w))) if n else 0
 
-    def _pixmap(self, champion: str) -> QPixmap | None:
+    def _pixmap(self, champion: str, grey: bool = False) -> QPixmap | None:
+        """grey=True：去色版本（重開局用），另外快取。"""
         path = self.icon_file(champion)
         if path is None:
             return None
@@ -217,7 +218,10 @@ class ChampionTiles(QWidget):
             if pm.isNull():
                 return None
             self._pixmaps[key] = pm
-        return self._pixmaps[key]
+        if grey and "grey:" + key not in self._pixmaps:
+            img = self._pixmaps[key].toImage().convertToFormat(QImage.Format_Grayscale8)
+            self._pixmaps["grey:" + key] = QPixmap.fromImage(img)
+        return self._pixmaps[("grey:" if grey else "") + key]
 
     def paintEvent(self, e):
         p = QPainter(self)
@@ -236,14 +240,16 @@ class ChampionTiles(QWidget):
             g = self.games[i]
             clip = QPainterPath(); clip.addRoundedRect(r, radius, radius)
             p.save(); p.setClipPath(clip)
-            pm = self._pixmap(g.champion)
+            pm = self._pixmap(g.champion, grey=g.remake)
             if pm:
                 p.drawPixmap(r, pm, QRectF(pm.rect()))
             else:  # 頭像還沒下載好：灰底加英雄 id 前兩個字母
                 p.fillRect(r, QColor("#3a3f4b"))
                 p.setPen(QColor(GREY)); p.drawText(r.adjusted(0, 0, 0, -bar), Qt.AlignCenter, g.champion[:2])
                 p.setPen(Qt.NoPen)
-            p.fillRect(QRectF(r.left(), r.bottom() - bar, s, bar), QColor(GREEN if g.win else RED))
+            if g.remake:  # 重開局：去色頭像再調暗，底條灰色
+                p.fillRect(r, QColor(27, 30, 36, 110))
+            p.fillRect(QRectF(r.left(), r.bottom() - bar, s, bar), QColor(GREY if g.remake else GREEN if g.win else RED))
             p.restore()
 
     def event(self, e):
@@ -409,9 +415,9 @@ class PlayerCard(QFrame):
             self.big.setText(f"<b style='font-size:24px;color:{wr_color(s.win_rate)}'>{round(s.win_rate * 100)}%</b>"
                              f"<br>{grey(f'{s.wins}勝{s.games - s.wins}敗')}")
             self.kda.setText(kda_html(s.kda, s.kd))
-            self.tiles.set_games(game_summaries(r.puuid, r.matches))
         else:
             self.big.setText(grey("近期沒有對戰")); self.kda.setText("")
+        self.tiles.set_games(game_summaries(r.puuid, r.matches))  # 全是重開局時統計為空，方塊仍列出
         e = r.encounter
         if e:
             when = "上一場" if e.games_ago == 0 else f"{e.games_ago + 1} 場前"
@@ -435,7 +441,8 @@ class PlayerCard(QFrame):
 
     def _tile_tip(self, g: GameSummary) -> str:
         return (f"{self.win.icon_html(g.champion, 32)}<br><b>{self.win.champions.name(g.champion)}</b> "
-                f"{g.kills}/{g.deaths}/{g.assists}<br>{grey(g.mode)}")
+                f"{g.kills}/{g.deaths}/{g.assists}<br>{grey(g.mode)}"
+                + (f"<br>{grey('重開局（不計入統計）')}" if g.remake else ""))
 
     def set_champion(self, key: int | None, m: Mastery | None = None, *, loaded: bool = False):
         """設定本場英雄；loaded=True 代表熟練度已查完（m 為 None 即沒玩過）。"""
