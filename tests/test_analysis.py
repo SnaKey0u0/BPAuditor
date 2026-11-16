@@ -40,6 +40,29 @@ def test_game_summaries_mode_from_queue_falling_back_to_game_mode():
     assert [g.mode for g in game_summaries("a", ms)] == ["ARAM", "單雙", "NEXUSBLITZ"]
 
 
+def test_game_summary_items_in_slot_order_skipping_empty_slots():
+    m = match("1", ["a"], [])
+    m["info"]["participants"][0].update(item0=3089, item1=0, item2=3020, item3=0, item4=0, item5=3157, item6=3364)
+    assert game_summaries("a", [m])[0].items == [3089, 3020, 3157, 3364]
+
+
+def test_game_summary_keystone_and_summoner_spells():
+    m = match("1", ["a"], [])
+    m["info"]["participants"][0].update(summoner1Id=32, summoner2Id=4, perks={"styles": [
+        {"description": "primaryStyle", "style": 8100, "selections": [{"perk": 8128}, {"perk": 8139}]},
+        {"description": "subStyle", "style": 8000, "selections": [{"perk": 8014}]}]})
+    g = game_summaries("a", [m])[0]
+    assert (g.keystone, g.spells) == (8128, [32, 4])
+
+
+def test_game_summary_without_perks_or_spells():
+    # 競技場等模式可能沒有符文；舊資料可能缺欄位
+    m = match("1", ["a"], [])
+    m["info"]["participants"][0].update(perks={"styles": []})
+    g = game_summaries("a", [m, match("2", ["a"], [])])
+    assert [(x.items, x.keystone, x.spells) for x in g] == [([], None, []), ([], None, [])]
+
+
 def test_premade_streak_from_most_recent():
     # A、B 最近 2 場同隊，第 3 場分開 → 連續 2 場
     ms = [match("1", ["a", "b"], []), match("2", [], ["a", "b"]), match("3", ["a"], ["b"])]

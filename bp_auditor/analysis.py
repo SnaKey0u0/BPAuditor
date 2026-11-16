@@ -2,7 +2,7 @@
 
 所有 `matches` 參數都是「新 → 舊」排序的 match-v5 對戰 dict 清單。
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import combinations
 
 PREMADE_MIN_STREAK = 2
@@ -64,6 +64,9 @@ class GameSummary:
     deaths: int
     assists: int
     mode: str      # 佇列的顯示名稱（例如 ARAM、單雙）；不認得的佇列用 gameMode
+    items: list[int] = field(default_factory=list)  # 結束時的裝備 id，依格子順序，空格略過
+    keystone: int | None = None                     # 主符文 id；該模式沒有符文時為 None
+    spells: list[int] = field(default_factory=list)  # 兩個召喚師技能的數字 key
 
 
 def _mode(match: dict) -> str:
@@ -71,9 +74,24 @@ def _mode(match: dict) -> str:
     return QUEUES.get(info.get("queueId"), info.get("gameMode", ""))
 
 
+def _items(p: dict) -> list[int]:
+    return [i for n in range(7) if (i := p.get(f"item{n}", 0))]
+
+
+def _keystone(p: dict) -> int | None:
+    styles = (p.get("perks") or {}).get("styles") or []
+    selections = styles[0].get("selections") or [] if styles else []
+    return selections[0].get("perk") if selections else None
+
+
+def _spells(p: dict) -> list[int]:
+    return [s for n in (1, 2) if (s := p.get(f"summoner{n}Id", 0))]
+
+
 def game_summaries(puuid: str, matches: list[dict]) -> list[GameSummary]:
     """近期戰績的每一場 → 單場摘要，新 → 舊；玩家不在的對戰略過。"""
-    return [GameSummary(p["win"], p["championName"], p["kills"], p["deaths"], p["assists"], _mode(m))
+    return [GameSummary(p["win"], p["championName"], p["kills"], p["deaths"], p["assists"], _mode(m),
+                        items=_items(p), keystone=_keystone(p), spells=_spells(p))
             for m in matches if (p := participant(m, puuid))]
 
 
