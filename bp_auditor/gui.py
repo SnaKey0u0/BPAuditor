@@ -463,7 +463,7 @@ class PlayerCard(QFrame):
         self.win.prefetch_tip_icons(games)
         if st := streak(games):
             color, bg = (GREEN, "#2e4a3a") if st.win else (RED, "#4a2e2e")
-            self.streak.setText(f"{'連勝' if st.win else '連敗'} {st.games}")
+            self.streak.setText(f"{'連勝中' if st.win else '連敗中'}({st.games})")
             self.streak.setStyleSheet(f"background:{bg};color:{color};border-radius:10px;padding:2px 8px;")
             self.streak.show()
         e = r.encounter
