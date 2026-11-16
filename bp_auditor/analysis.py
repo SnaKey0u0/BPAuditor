@@ -7,6 +7,7 @@ from itertools import combinations
 
 PREMADE_MIN_STREAK = 2
 PREMADE_MIN_TOTAL = 3
+STREAK_MIN = 3  # 連勝／連敗達這個場數才標示
 QUEUES = {450: "ARAM", 420: "單雙", 440: "彈性", 400: "一般", 430: "一般", 490: "快速", 1700: "競技場",
           900: "URF", 1900: "URF", 1300: "極限"}
 
@@ -84,6 +85,21 @@ def game_summaries(puuid: str, matches: list[dict]) -> list[GameSummary]:
     return [GameSummary(p["win"], p["championName"], p["kills"], p["deaths"], p["assists"], _mode(m),
                         remake=is_remake(p))
             for m in matches if (p := participant(m, puuid))]
+
+
+@dataclass
+class Streak:
+    win: bool   # True = 連勝，False = 連敗
+    games: int
+
+
+def streak(games: list[GameSummary]) -> Streak | None:
+    """連勝／連敗：略過重開局（不打斷也不計數），從最近一場往回連續同結果的場數；未達 STREAK_MIN 回傳 None。"""
+    results = [g.win for g in games if not g.remake]
+    if not results:
+        return None
+    n = next((i for i, w in enumerate(results) if w != results[0]), len(results))
+    return Streak(results[0], n) if n >= STREAK_MIN else None
 
 
 TIERS = {"IRON": "鐵", "BRONZE": "銅", "SILVER": "銀", "GOLD": "金", "PLATINUM": "白金", "EMERALD": "翡翠",
