@@ -71,7 +71,7 @@ def grey(text: str) -> str:
 def kda_html(kda: float, kd: float) -> str:
     """平均 KDA < 3、KD < 1 紅色，否則綠色；兩者同字體大小，上下兩行。"""
     def line(label: str, value: float, good: float) -> str:
-        return f"{grey(label)} <b style='color:{GREEN if value >= good else RED}'>{value:.1f}</b>"
+        return f"{grey(label)} <b style='color:{GREEN if value >= good else RED}'>{value:.2f}</b>"
     return f"<span style='font-size:15px'>{line('KDA', kda, KDA_GOOD)}<br>{line('KD', kd, KD_GOOD)}</span>"
 
 
