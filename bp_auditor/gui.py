@@ -274,6 +274,8 @@ class PlayerCard(QFrame):
         self.champion_key: int | None = None  # 本場英雄；只在遊戲中有
         self.mastery: Mastery | None = None
         self.mastery_loaded = False
+        self.puuid = ""  # 稽查結果回來才有；黑名單以此判定
+        self.blacklisted = False
         self.set_stripe(None)
         v = QVBoxLayout(self); v.setContentsMargins(12, 8, 10, 8); v.setSpacing(4)
 
@@ -285,6 +287,17 @@ class PlayerCard(QFrame):
         head.addWidget(self.title, 0, Qt.AlignTop); head.addWidget(self.rank, 1)
         self.header_right = QHBoxLayout(); self.header_right.setSpacing(4)
         head.addLayout(self.header_right)
+        # 「!」黑名單切換鈕：取得 PUUID 後才可按；本人與身分被隱藏的玩家不顯示
+        self.flag = QPushButton("!"); self.flag.setObjectName("flag")
+        self.flag.setCheckable(True); self.flag.setFixedSize(24, 24); self.flag.setEnabled(False)
+        self.flag.setCursor(Qt.PointingHandCursor); self.flag.clicked.connect(self.toggle_blacklist)
+        self.flag.setStyleSheet(
+            f"QPushButton{{background:transparent;border:1px solid #4a5060;border-radius:12px;padding:0;"
+            f"color:{GREY};font-weight:bold;font-size:14px;}}"
+            f"QPushButton:hover{{border-color:{RED};color:{RED};}}"
+            f"QPushButton:checked{{background:{RED};border-color:{RED};color:#1b1e24;}}"
+            f"QPushButton:disabled{{border-color:#30343d;color:#4a5060;}}")
+        self.header_right.addWidget(self.flag, 0, Qt.AlignTop)
         v.addLayout(head)
 
         mid = QHBoxLayout(); mid.setSpacing(14)
@@ -298,8 +311,10 @@ class PlayerCard(QFrame):
         v.addWidget(self.champ)
 
         self.tags = QHBoxLayout(); self.tags.setSpacing(6)
+        self.black_tag = QLabel("! 黑名單"); self.black_tag.hide()
+        self.black_tag.setStyleSheet(f"background:{RED};color:#1b1e24;font-weight:bold;border-radius:10px;padding:2px 9px;")
         self.chip = QLabel(); self.chip.hide()
-        self.tags.addWidget(self.chip); self.tags.addStretch()
+        self.tags.addWidget(self.black_tag); self.tags.addWidget(self.chip); self.tags.addStretch()
         v.addLayout(self.tags)
         self.bottom = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Minimum)
         v.addItem(self.bottom)
@@ -320,6 +335,7 @@ class PlayerCard(QFrame):
         self.clear_skeleton(); self.tiles.hide(); self.rank.hide(); self.kda.hide()
         self.big.setText(grey("Riot 沒有提供這位玩家的身分，無法查詢"))
         self.hidden = True
+        self.flag.hide()
         self.show_champion()
 
     def set_title(self, extra: str = ""):
@@ -328,9 +344,35 @@ class PlayerCard(QFrame):
 
     def mark_me(self):
         self.is_me = True
+        self.flag.hide()
+        self.show_blacklist()
 
     def set_stripe(self, color):
-        self.setStyleSheet(f"#card{{border-left:6px solid {color or '#262a33'};}}")
+        """可能多排的左側色條；與黑名單的紅框暗紅底一起組成卡片樣式。"""
+        self.stripe = color
+        self._restyle()
+
+    def _restyle(self):
+        if self.blacklisted:  # 黑名單：紅框＋暗紅底，可能多排的色條照樣蓋在左邊
+            self.setStyleSheet(f"#card{{background:#3a2226;border:1px solid {RED};"
+                               f"border-left:6px solid {self.stripe or RED};}}")
+        else:
+            self.setStyleSheet(f"#card{{border-left:6px solid {self.stripe or '#262a33'};}}")
+
+    def toggle_blacklist(self):
+        if self.puuid and not self.is_me:
+            self.win.cfg.toggle_blacklist(self.puuid)
+        self.show_blacklist()
+
+    def show_blacklist(self):
+        """依設定檔的黑名單更新「!」按鈕、標籤與卡片顏色；沒有 PUUID（查詢中／失敗）時按鈕不可用。"""
+        usable = bool(self.puuid) and not self.is_me and not self.hidden
+        self.blacklisted = usable and self.win.cfg.is_blacklisted(self.puuid)
+        self.flag.setEnabled(usable)
+        self.flag.setChecked(self.blacklisted)
+        self.flag.setToolTip("已在黑名單（再點一次移除）" if self.blacklisted else "加入黑名單")
+        self.black_tag.setVisible(self.blacklisted)
+        self._restyle()
 
     def set_skeleton(self):
         """查詢中：灰色佔位方塊。"""
@@ -349,6 +391,8 @@ class PlayerCard(QFrame):
         self.clear_skeleton()
         self.tiles.set_games([])
         self.show_champion()
+        self.puuid = "" if r.error else (r.puuid or "")
+        self.show_blacklist()
         if r.error:
             if r.error.kind == "key":
                 self.big.setText(grey("—")); self.big.setToolTip("")
