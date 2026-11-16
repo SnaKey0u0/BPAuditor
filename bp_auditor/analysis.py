@@ -7,6 +7,7 @@ from itertools import combinations
 
 PREMADE_MIN_STREAK = 2
 PREMADE_MIN_TOTAL = 3
+STREAK_MIN = 3  # 連勝／連敗達這個場數才標示
 QUEUES = {450: "ARAM", 420: "單雙", 440: "彈性", 400: "一般", 430: "一般", 490: "快速", 1700: "競技場",
           900: "URF", 1900: "URF", 1300: "極限"}
 
@@ -43,15 +44,22 @@ class RecentStats:
         return self.wins / self.games if self.games else 0.0
 
 
+def is_remake(p: dict) -> bool:
+    """重開局：Riot 把該玩家這場標成提早投降結束（一般投降不算）。"""
+    return bool(p.get("gameEndedInEarlySurrender"))
+
+
 def recent_stats(puuid: str, matches: list[dict]) -> RecentStats:
-    ps = [p for m in matches if (p := participant(m, puuid))]
+    """近期戰績的統計；重開局不計入（不補抓場次），玩家等級仍取最近一場。"""
+    played = [p for m in matches if (p := participant(m, puuid))]
+    ps = [p for p in played if not is_remake(p)]
     return RecentStats(
         games=len(ps),
         wins=sum(p["win"] for p in ps),
         kda=_kda(ps),
         kd=_kd(ps),
         results=[p["win"] for p in ps],
-        level=ps[0].get("summonerLevel") if ps else None,
+        level=played[0].get("summonerLevel") if played else None,
     )
 
 
@@ -64,6 +72,7 @@ class GameSummary:
     deaths: int
     assists: int
     mode: str      # 佇列的顯示名稱（例如 ARAM、單雙）；不認得的佇列用 gameMode
+    remake: bool = False  # 重開局：列出但不計入統計，方塊以灰色呈現
     items: list[int] = field(default_factory=list)  # 結束時的裝備 id，依格子順序，空格略過
     keystone: int | None = None                     # 主符文 id；該模式沒有符文時為 None
     spells: list[int] = field(default_factory=list)  # 兩個召喚師技能的數字 key
@@ -91,8 +100,23 @@ def _spells(p: dict) -> list[int]:
 def game_summaries(puuid: str, matches: list[dict]) -> list[GameSummary]:
     """近期戰績的每一場 → 單場摘要，新 → 舊；玩家不在的對戰略過。"""
     return [GameSummary(p["win"], p["championName"], p["kills"], p["deaths"], p["assists"], _mode(m),
-                        items=_items(p), keystone=_keystone(p), spells=_spells(p))
+                        remake=is_remake(p), items=_items(p), keystone=_keystone(p), spells=_spells(p))
             for m in matches if (p := participant(m, puuid))]
+
+
+@dataclass
+class Streak:
+    win: bool   # True = 連勝，False = 連敗
+    games: int
+
+
+def streak(games: list[GameSummary]) -> Streak | None:
+    """連勝／連敗：略過重開局（不打斷也不計數），從最近一場往回連續同結果的場數；未達 STREAK_MIN 回傳 None。"""
+    results = [g.win for g in games if not g.remake]
+    if not results:
+        return None
+    n = next((i for i, w in enumerate(results) if w != results[0]), len(results))
+    return Streak(results[0], n) if n >= STREAK_MIN else None
 
 
 TIERS = {"IRON": "鐵", "BRONZE": "銅", "SILVER": "銀", "GOLD": "金", "PLATINUM": "白金", "EMERALD": "翡翠",

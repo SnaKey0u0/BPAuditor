@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QGuiApplication, QIcon, QPainter, QPainterPath,
-                           QPixmap)
+                           QImage, QPixmap)
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import autostart, single
-from .analysis import GameSummary, Mastery, PremadeGroup, detect_premades, game_summaries, split_game
+from .analysis import GameSummary, Mastery, PremadeGroup, detect_premades, game_summaries, split_game, streak
 from .audit import ME, Audit, AuditOutcome, Me, PlayerResult
 from .champions import Champions, Icon, download_asset, download_icon, icon_dir, icon_path
 from .config import Config
@@ -71,7 +71,7 @@ def grey(text: str) -> str:
 def kda_html(kda: float, kd: float) -> str:
     """平均 KDA < 3、KD < 1 紅色，否則綠色；兩者同字體大小，上下兩行。"""
     def line(label: str, value: float, good: float) -> str:
-        return f"{grey(label)} <b style='color:{GREEN if value >= good else RED}'>{value:.1f}</b>"
+        return f"{grey(label)} <b style='color:{GREEN if value >= good else RED}'>{value:.2f}</b>"
     return f"<span style='font-size:15px'>{line('KDA', kda, KDA_GOOD)}<br>{line('KD', kd, KD_GOOD)}</span>"
 
 
@@ -207,7 +207,8 @@ class ChampionTiles(QWidget):
         n = self._count()
         return self._extent(math.ceil(n / self._per_row(w))) if n else 0
 
-    def _pixmap(self, champion: str) -> QPixmap | None:
+    def _pixmap(self, champion: str, grey: bool = False) -> QPixmap | None:
+        """grey=True：去色版本（重開局用），另外快取。"""
         path = self.icon_file(champion)
         if path is None:
             return None
@@ -217,7 +218,10 @@ class ChampionTiles(QWidget):
             if pm.isNull():
                 return None
             self._pixmaps[key] = pm
-        return self._pixmaps[key]
+        if grey and "grey:" + key not in self._pixmaps:
+            img = self._pixmaps[key].toImage().convertToFormat(QImage.Format_Grayscale8)
+            self._pixmaps["grey:" + key] = QPixmap.fromImage(img)
+        return self._pixmaps[("grey:" if grey else "") + key]
 
     def paintEvent(self, e):
         p = QPainter(self)
@@ -236,14 +240,16 @@ class ChampionTiles(QWidget):
             g = self.games[i]
             clip = QPainterPath(); clip.addRoundedRect(r, radius, radius)
             p.save(); p.setClipPath(clip)
-            pm = self._pixmap(g.champion)
+            pm = self._pixmap(g.champion, grey=g.remake)
             if pm:
                 p.drawPixmap(r, pm, QRectF(pm.rect()))
             else:  # 頭像還沒下載好：灰底加英雄 id 前兩個字母
                 p.fillRect(r, QColor("#3a3f4b"))
                 p.setPen(QColor(GREY)); p.drawText(r.adjusted(0, 0, 0, -bar), Qt.AlignCenter, g.champion[:2])
                 p.setPen(Qt.NoPen)
-            p.fillRect(QRectF(r.left(), r.bottom() - bar, s, bar), QColor(GREEN if g.win else RED))
+            if g.remake:  # 重開局：去色頭像再調暗，底條灰色
+                p.fillRect(r, QColor(27, 30, 36, 110))
+            p.fillRect(QRectF(r.left(), r.bottom() - bar, s, bar), QColor(GREY if g.remake else GREEN if g.win else RED))
             p.restore()
 
     def event(self, e):
@@ -274,6 +280,8 @@ class PlayerCard(QFrame):
         self.champion_key: int | None = None  # 本場英雄；只在遊戲中有
         self.mastery: Mastery | None = None
         self.mastery_loaded = False
+        self.puuid = ""  # 稽查結果回來才有；黑名單以此判定
+        self.blacklisted = False
         self.set_stripe(None)
         v = QVBoxLayout(self); v.setContentsMargins(12, 8, 10, 8); v.setSpacing(4)
 
@@ -285,6 +293,17 @@ class PlayerCard(QFrame):
         head.addWidget(self.title, 0, Qt.AlignTop); head.addWidget(self.rank, 1)
         self.header_right = QHBoxLayout(); self.header_right.setSpacing(4)
         head.addLayout(self.header_right)
+        # 「!」黑名單切換鈕：取得 PUUID 後才可按；本人與身分被隱藏的玩家不顯示
+        self.flag = QPushButton("!"); self.flag.setObjectName("flag")
+        self.flag.setCheckable(True); self.flag.setFixedSize(24, 24); self.flag.setEnabled(False)
+        self.flag.setCursor(Qt.PointingHandCursor); self.flag.clicked.connect(self.toggle_blacklist)
+        self.flag.setStyleSheet(
+            f"QPushButton{{background:transparent;border:1px solid #4a5060;border-radius:12px;padding:0;"
+            f"color:{GREY};font-weight:bold;font-size:14px;}}"
+            f"QPushButton:hover{{border-color:{RED};color:{RED};}}"
+            f"QPushButton:checked{{background:{RED};border-color:{RED};color:#1b1e24;}}"
+            f"QPushButton:disabled{{border-color:#30343d;color:#4a5060;}}")
+        self.header_right.addWidget(self.flag, 0, Qt.AlignTop)
         v.addLayout(head)
 
         mid = QHBoxLayout(); mid.setSpacing(14)
@@ -298,8 +317,12 @@ class PlayerCard(QFrame):
         v.addWidget(self.champ)
 
         self.tags = QHBoxLayout(); self.tags.setSpacing(6)
+        self.black_tag = QLabel("! 黑名單"); self.black_tag.hide()
+        self.black_tag.setStyleSheet(f"background:{RED};color:#1b1e24;font-weight:bold;border-radius:10px;padding:2px 9px;")
+        self.streak = QLabel(); self.streak.hide()  # 連勝／連敗
         self.chip = QLabel(); self.chip.hide()
-        self.tags.addWidget(self.chip); self.tags.addStretch()
+        self.tags.addWidget(self.black_tag); self.tags.addWidget(self.streak); self.tags.addWidget(self.chip)
+        self.tags.addStretch()
         v.addLayout(self.tags)
         self.bottom = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Minimum)
         v.addItem(self.bottom)
@@ -320,6 +343,7 @@ class PlayerCard(QFrame):
         self.clear_skeleton(); self.tiles.hide(); self.rank.hide(); self.kda.hide()
         self.big.setText(grey("Riot 沒有提供這位玩家的身分，無法查詢"))
         self.hidden = True
+        self.flag.hide()
         self.show_champion()
 
     def set_title(self, extra: str = ""):
@@ -328,9 +352,35 @@ class PlayerCard(QFrame):
 
     def mark_me(self):
         self.is_me = True
+        self.flag.hide()
+        self.show_blacklist()
 
     def set_stripe(self, color):
-        self.setStyleSheet(f"#card{{border-left:6px solid {color or '#262a33'};}}")
+        """可能多排的左側色條；與黑名單的紅框暗紅底一起組成卡片樣式。"""
+        self.stripe = color
+        self._restyle()
+
+    def _restyle(self):
+        if self.blacklisted:  # 黑名單：紅框＋暗紅底，可能多排的色條照樣蓋在左邊
+            self.setStyleSheet(f"#card{{background:#3a2226;border:1px solid {RED};"
+                               f"border-left:6px solid {self.stripe or RED};}}")
+        else:
+            self.setStyleSheet(f"#card{{border-left:6px solid {self.stripe or '#262a33'};}}")
+
+    def toggle_blacklist(self):
+        if self.puuid and not self.is_me:
+            self.win.cfg.toggle_blacklist(self.puuid)
+        self.show_blacklist()
+
+    def show_blacklist(self):
+        """依設定檔的黑名單更新「!」按鈕、標籤與卡片顏色；沒有 PUUID（查詢中／失敗）時按鈕不可用。"""
+        usable = bool(self.puuid) and not self.is_me and not self.hidden
+        self.blacklisted = usable and self.win.cfg.is_blacklisted(self.puuid)
+        self.flag.setEnabled(usable)
+        self.flag.setChecked(self.blacklisted)
+        self.flag.setToolTip("已在黑名單（再點一次移除）" if self.blacklisted else "加入黑名單")
+        self.black_tag.setVisible(self.blacklisted)
+        self._restyle()
 
     def set_skeleton(self):
         """查詢中：灰色佔位方塊。"""
@@ -348,7 +398,10 @@ class PlayerCard(QFrame):
         self.result = r
         self.clear_skeleton()
         self.tiles.set_games([])
+        self.streak.hide()
         self.show_champion()
+        self.puuid = "" if r.error else (r.puuid or "")
+        self.show_blacklist()
         if r.error:
             if r.error.kind == "key":
                 self.big.setText(grey("—")); self.big.setToolTip("")
@@ -365,10 +418,16 @@ class PlayerCard(QFrame):
             self.big.setText(f"<b style='font-size:24px;color:{wr_color(s.win_rate)}'>{round(s.win_rate * 100)}%</b>"
                              f"<br>{grey(f'{s.wins}勝{s.games - s.wins}敗')}")
             self.kda.setText(kda_html(s.kda, s.kd))
-            self.tiles.set_games(game_summaries(r.puuid, r.matches))
-            self.win.prefetch_tip_icons(self.tiles.games)
         else:
             self.big.setText(grey("近期沒有對戰")); self.kda.setText("")
+        games = game_summaries(r.puuid, r.matches)
+        self.tiles.set_games(games)  # 全是重開局時統計為空，方塊仍列出
+        self.win.prefetch_tip_icons(games)
+        if st := streak(games):
+            color, bg = (GREEN, "#2e4a3a") if st.win else (RED, "#4a2e2e")
+            self.streak.setText(f"{'連勝' if st.win else '連敗'} {st.games}")
+            self.streak.setStyleSheet(f"background:{bg};color:{color};border-radius:10px;padding:2px 8px;")
+            self.streak.show()
         e = r.encounter
         if e:
             when = "上一場" if e.games_ago == 0 else f"{e.games_ago + 1} 場前"
@@ -407,6 +466,8 @@ class PlayerCard(QFrame):
         if rune or g.spells:
             rows.append(f"<tr><td colspan='2'>{'&nbsp;'.join(i for i in icons if i)}"
                         f"{'&nbsp;' + grey(rune.name) if rune else ''}</td></tr>")
+        if g.remake:
+            rows.append(f"<tr><td colspan='2'>{grey('重開局（不計入統計）')}</td></tr>")
         return f"<table cellspacing='0' cellpadding='2'>{''.join(rows)}</table>"
 
     def set_champion(self, key: int | None, m: Mastery | None = None, *, loaded: bool = False):

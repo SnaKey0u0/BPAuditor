@@ -1,14 +1,16 @@
-from bp_auditor.analysis import (detect_premades, find_encounter, game_summaries, mastery, ranks, recent_stats,
-                                 split_game)
+from bp_auditor.analysis import (STREAK_MIN, detect_premades, find_encounter, game_summaries, mastery, ranks,
+                                 recent_stats, split_game, streak)
 
 
-def match(mid, team100, team200, *, win100=True, champ="Ahri", kda=(2, 1, 3), queue=450, mode="ARAM"):
-    """team100/team200: puuid 清單。"""
+def match(mid, team100, team200, *, win100=True, champ="Ahri", kda=(2, 1, 3), queue=450, mode="ARAM",
+          remake=False, surrender=False):
+    """team100/team200: puuid 清單。remake=True：重開局（提早投降）；surrender=True：一般投降。"""
     ps = []
     for team, members, win in ((100, team100, win100), (200, team200, not win100)):
         for pu in members:
             ps.append(dict(puuid=pu, teamId=team, win=win, championName=champ, summonerLevel=100,
-                           kills=kda[0], deaths=kda[1], assists=kda[2]))
+                           kills=kda[0], deaths=kda[1], assists=kda[2],
+                           gameEndedInEarlySurrender=remake, gameEndedInSurrender=surrender))
     return {"metadata": {"matchId": mid}, "info": {"participants": ps, "queueId": queue, "gameMode": mode}}
 
 
@@ -18,6 +20,25 @@ def test_recent_stats():
     assert (s.games, s.wins, s.results, s.level) == (2, 1, [True, False], 100)
     assert s.kda == 5.0
     assert s.kd == 2.0
+
+
+def _stats_tuple(s):
+    return (s.games, s.wins, s.win_rate, s.kda, s.kd, s.results)
+
+
+def test_recent_stats_exclude_remake_same_as_without_it():
+    normal = [match("1", ["a"], ["x"], kda=(4, 2, 6)), match("3", ["x"], ["a"], kda=(1, 3, 2))]
+    remake = match("2", ["a"], ["x"], win100=True, kda=(9, 0, 9), remake=True)
+    with_remake = recent_stats("a", [normal[0], remake, normal[1]])
+    assert _stats_tuple(with_remake) == _stats_tuple(recent_stats("a", normal))
+    assert (with_remake.games, with_remake.wins) == (2, 1)
+
+
+def test_recent_stats_all_remakes_same_as_no_games():
+    ms = [match("1", ["a"], ["x"], remake=True), match("2", ["x"], ["a"], remake=True)]
+    s = recent_stats("a", ms)
+    assert _stats_tuple(s) == _stats_tuple(recent_stats("a", []))
+    assert (s.games, s.win_rate) == (0, 0.0)
 
 
 def test_game_summaries_newest_first_with_result_champion_and_kda():
@@ -61,6 +82,41 @@ def test_game_summary_without_perks_or_spells():
     m["info"]["participants"][0].update(perks={"styles": []})
     g = game_summaries("a", [m, match("2", ["a"], [])])
     assert [(x.items, x.keystone, x.spells) for x in g] == [([], None, []), ([], None, [])]
+
+
+def test_game_summaries_flag_remake_but_not_normal_surrender():
+    ms = [match("1", ["a"], ["x"], remake=True), match("2", ["a"], ["x"], surrender=True), match("3", ["a"], ["x"])]
+    assert [g.remake for g in game_summaries("a", ms)] == [True, False, False]
+
+
+def _games(*results):
+    """results：新 → 舊，'W' 贏、'L' 輸、'R' 重開局 → 玩家 a 的單場摘要。"""
+    return game_summaries("a", [match(str(i), ["a"], ["x"], win100=r == "W", remake=r == "R")
+                                for i, r in enumerate(results)])
+
+
+def test_streak_of_2_not_reported_3_reported_with_count_and_direction():
+    assert STREAK_MIN == 3
+    assert streak(_games("W", "W", "L", "W")) is None
+    assert streak(_games("L", "L", "W")) is None
+    s = streak(_games("W", "W", "W", "L", "W"))
+    assert (s.win, s.games) == (True, 3)
+    s = streak(_games("L", "L", "L", "L", "W"))
+    assert (s.win, s.games) == (False, 4)
+
+
+def test_streak_remake_in_losing_streak_neither_breaks_nor_counts():
+    s = streak(_games("L", "R", "L", "L", "W"))
+    assert (s.win, s.games) == (False, 3)
+    s = streak(_games("R", "L", "L", "R", "W"))
+    assert s is None
+
+
+def test_streak_all_wins_counts_every_game_and_none_without_games():
+    s = streak(_games("W", "R", "W", "W", "W", "W"))
+    assert (s.win, s.games) == (True, 5)
+    assert streak([]) is None
+    assert streak(_games("R", "R", "R")) is None
 
 
 def test_premade_streak_from_most_recent():
