@@ -107,5 +107,7 @@ def download_asset(icon: Icon) -> Path:
         with urllib.request.urlopen(icon.url, timeout=10) as r:
             data = r.read()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        part = path.with_suffix(".part")  # 寫完才改名，介面不會讀到一半的檔案
+        part.write_bytes(data)
+        part.replace(path)
     return path
