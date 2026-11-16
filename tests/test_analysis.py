@@ -1,5 +1,5 @@
-from bp_auditor.analysis import (FeedingThresholds, detect_premades, find_encounter, game_summaries, mastery, ranks,
-                                 recent_stats, split_game)
+from bp_auditor.analysis import (STREAK_MIN, FeedingThresholds, detect_premades, find_encounter, game_summaries,
+                                 mastery, ranks, recent_stats, split_game, streak)
 
 
 def match(mid, team100, team200, *, win100=True, champ="Ahri", kda=(2, 1, 3), queue=450, mode="ARAM",
@@ -61,6 +61,29 @@ def test_game_summaries_mode_from_queue_falling_back_to_game_mode():
     assert [g.mode for g in game_summaries("a", ms)] == ["ARAM", "單雙", "NEXUSBLITZ"]
 
 
+def test_game_summary_items_in_slot_order_skipping_empty_slots():
+    m = match("1", ["a"], [])
+    m["info"]["participants"][0].update(item0=3089, item1=0, item2=3020, item3=0, item4=0, item5=3157, item6=3364)
+    assert game_summaries("a", [m])[0].items == [3089, 3020, 3157, 3364]
+
+
+def test_game_summary_keystone_and_summoner_spells():
+    m = match("1", ["a"], [])
+    m["info"]["participants"][0].update(summoner1Id=32, summoner2Id=4, perks={"styles": [
+        {"description": "primaryStyle", "style": 8100, "selections": [{"perk": 8128}, {"perk": 8139}]},
+        {"description": "subStyle", "style": 8000, "selections": [{"perk": 8014}]}]})
+    g = game_summaries("a", [m])[0]
+    assert (g.keystone, g.spells) == (8128, [32, 4])
+
+
+def test_game_summary_without_perks_or_spells():
+    # 競技場等模式可能沒有符文；舊資料可能缺欄位
+    m = match("1", ["a"], [])
+    m["info"]["participants"][0].update(perks={"styles": []})
+    g = game_summaries("a", [m, match("2", ["a"], [])])
+    assert [(x.items, x.keystone, x.spells) for x in g] == [([], None, []), ([], None, [])]
+
+
 def test_game_summaries_flag_remake_but_not_normal_surrender():
     ms = [match("1", ["a"], ["x"], remake=True), match("2", ["a"], ["x"], surrender=True), match("3", ["a"], ["x"])]
     assert [g.remake for g in game_summaries("a", ms)] == [True, False, False]
@@ -116,6 +139,36 @@ def test_game_summaries_default_thresholds_and_per_game_kda_kd():
     g = game_summaries("a", [match("1", ["a"], ["x"], kda=(3, 12, 5))])[0]
     assert (g.feeding, g.kda, g.kd) == (True, 8 / 12, 3 / 12)
     assert game_summaries("a", [match("1", ["a"], ["x"], kda=(3, 0, 5))])[0].kda == 8.0
+
+
+def _games(*results):
+    """results：新 → 舊，'W' 贏、'L' 輸、'R' 重開局 → 玩家 a 的單場摘要。"""
+    return game_summaries("a", [match(str(i), ["a"], ["x"], win100=r == "W", remake=r == "R")
+                                for i, r in enumerate(results)])
+
+
+def test_streak_of_2_not_reported_3_reported_with_count_and_direction():
+    assert STREAK_MIN == 3
+    assert streak(_games("W", "W", "L", "W")) is None
+    assert streak(_games("L", "L", "W")) is None
+    s = streak(_games("W", "W", "W", "L", "W"))
+    assert (s.win, s.games) == (True, 3)
+    s = streak(_games("L", "L", "L", "L", "W"))
+    assert (s.win, s.games) == (False, 4)
+
+
+def test_streak_remake_in_losing_streak_neither_breaks_nor_counts():
+    s = streak(_games("L", "R", "L", "L", "W"))
+    assert (s.win, s.games) == (False, 3)
+    s = streak(_games("R", "L", "L", "R", "W"))
+    assert s is None
+
+
+def test_streak_all_wins_counts_every_game_and_none_without_games():
+    s = streak(_games("W", "R", "W", "W", "W", "W"))
+    assert (s.win, s.games) == (True, 5)
+    assert streak([]) is None
+    assert streak(_games("R", "R", "R")) is None
 
 
 def test_premade_streak_from_most_recent():

@@ -1,7 +1,7 @@
 """使用者設定（API Key、本人、查詢場數等）存在 %APPDATA%\\BPAuditor\\config.json，絕不打包進程式。"""
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 
@@ -23,6 +23,20 @@ class Config:
     feeding_kda_below: float = 2.0
     feeding_kd_at_most: float = 0.5
     feeding_min_deaths: int = 10
+    # 黑名單只存 PUUID（改名後仍認得）；PUUID 依 Key 類型加密，換 Key 類型會失效（使用者接受）
+    blacklist: list[str] = field(default_factory=list)
+
+    def is_blacklisted(self, puuid: str) -> bool:
+        return bool(puuid) and puuid in self.blacklist
+
+    def toggle_blacklist(self, puuid: str) -> bool:
+        """切換黑名單並立即存檔；回傳切換後是否在黑名單。"""
+        if puuid in self.blacklist:
+            self.blacklist.remove(puuid)
+        else:
+            self.blacklist.append(puuid)
+        self.save()
+        return puuid in self.blacklist
 
     def set_key(self, key: str, now: float):
         key = key.strip()

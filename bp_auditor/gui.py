@@ -18,9 +18,10 @@ from PySide6.QtWidgets import (
 )
 
 from . import autostart, single
-from .analysis import FeedingThresholds, GameSummary, Mastery, PremadeGroup, detect_premades, game_summaries, split_game
+from .analysis import (FeedingThresholds, GameSummary, Mastery, PremadeGroup, detect_premades, game_summaries,
+                       split_game, streak)
 from .audit import ME, Audit, AuditOutcome, Me, PlayerResult
-from .champions import Champions, download_icon, icon_path
+from .champions import Champions, Icon, download_asset, download_icon, icon_dir, icon_path
 from .config import Config
 from .parsing import RiotId, members_to_query, parse_room_messages, room_change, room_members_in_clipboard
 from .riot import DEV_KEY_LIFETIME, KEY_PAGE, RateLimiter, RiotClient, RiotError, find_api_key
@@ -293,6 +294,8 @@ class PlayerCard(QFrame):
         self.champion_key: int | None = None  # 本場英雄；只在遊戲中有
         self.mastery: Mastery | None = None
         self.mastery_loaded = False
+        self.puuid = ""  # 稽查結果回來才有；黑名單以此判定
+        self.blacklisted = False
         self.set_stripe(None)
         v = QVBoxLayout(self); v.setContentsMargins(12, 8, 10, 8); v.setSpacing(4)
 
@@ -304,6 +307,17 @@ class PlayerCard(QFrame):
         head.addWidget(self.title, 0, Qt.AlignTop); head.addWidget(self.rank, 1)
         self.header_right = QHBoxLayout(); self.header_right.setSpacing(4)
         head.addLayout(self.header_right)
+        # 「!」黑名單切換鈕：取得 PUUID 後才可按；本人與身分被隱藏的玩家不顯示
+        self.flag = QPushButton("!"); self.flag.setObjectName("flag")
+        self.flag.setCheckable(True); self.flag.setFixedSize(24, 24); self.flag.setEnabled(False)
+        self.flag.setCursor(Qt.PointingHandCursor); self.flag.clicked.connect(self.toggle_blacklist)
+        self.flag.setStyleSheet(
+            f"QPushButton{{background:transparent;border:1px solid #4a5060;border-radius:12px;padding:0;"
+            f"color:{GREY};font-weight:bold;font-size:14px;}}"
+            f"QPushButton:hover{{border-color:{RED};color:{RED};}}"
+            f"QPushButton:checked{{background:{RED};border-color:{RED};color:#1b1e24;}}"
+            f"QPushButton:disabled{{border-color:#30343d;color:#4a5060;}}")
+        self.header_right.addWidget(self.flag, 0, Qt.AlignTop)
         v.addLayout(head)
 
         mid = QHBoxLayout(); mid.setSpacing(14)
@@ -317,13 +331,16 @@ class PlayerCard(QFrame):
         v.addWidget(self.champ)
 
         self.tags = QHBoxLayout(); self.tags.setSpacing(6)
+        self.black_tag = QLabel("! 黑名單"); self.black_tag.hide()
+        self.black_tag.setStyleSheet(f"background:{RED};color:#1b1e24;font-weight:bold;border-radius:10px;padding:2px 9px;")
+        self.streak = QLabel(); self.streak.hide()  # 連勝／連敗
         self.chip = QLabel(); self.chip.hide()
-        self.tags.addWidget(self.chip); self.tags.addStretch()
         self.feed_tag = QLabel("送頭"); self.feed_tag.hide()  # 近期戰績有任一場送頭場；排在相遇之前
         self.feed_tag.setStyleSheet(f"background:#12303a;color:{NEON};border:1px solid {NEON};"
                                     "border-radius:10px;padding:2px 9px;")
         self.feed_tag.setToolTip("有青色霓虹框的那幾場；滑鼠移到方塊上看細節")
-        self.tags.insertWidget(self.tags.indexOf(self.chip), self.feed_tag)
+        self.tags.addWidget(self.black_tag); self.tags.addWidget(self.streak); self.tags.addWidget(self.feed_tag)
+        self.tags.addWidget(self.chip); self.tags.addStretch()
         v.addLayout(self.tags)
         self.bottom = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Minimum)
         v.addItem(self.bottom)
@@ -344,6 +361,7 @@ class PlayerCard(QFrame):
         self.clear_skeleton(); self.tiles.hide(); self.rank.hide(); self.kda.hide()
         self.big.setText(grey("Riot 沒有提供這位玩家的身分，無法查詢"))
         self.hidden = True
+        self.flag.hide()
         self.show_champion()
 
     def set_title(self, extra: str = ""):
@@ -352,9 +370,35 @@ class PlayerCard(QFrame):
 
     def mark_me(self):
         self.is_me = True
+        self.flag.hide()
+        self.show_blacklist()
 
     def set_stripe(self, color):
-        self.setStyleSheet(f"#card{{border-left:6px solid {color or '#262a33'};}}")
+        """可能多排的左側色條；與黑名單的紅框暗紅底一起組成卡片樣式。"""
+        self.stripe = color
+        self._restyle()
+
+    def _restyle(self):
+        if self.blacklisted:  # 黑名單：紅框＋暗紅底，可能多排的色條照樣蓋在左邊
+            self.setStyleSheet(f"#card{{background:#3a2226;border:1px solid {RED};"
+                               f"border-left:6px solid {self.stripe or RED};}}")
+        else:
+            self.setStyleSheet(f"#card{{border-left:6px solid {self.stripe or '#262a33'};}}")
+
+    def toggle_blacklist(self):
+        if self.puuid and not self.is_me:
+            self.win.cfg.toggle_blacklist(self.puuid)
+        self.show_blacklist()
+
+    def show_blacklist(self):
+        """依設定檔的黑名單更新「!」按鈕、標籤與卡片顏色；沒有 PUUID（查詢中／失敗）時按鈕不可用。"""
+        usable = bool(self.puuid) and not self.is_me and not self.hidden
+        self.blacklisted = usable and self.win.cfg.is_blacklisted(self.puuid)
+        self.flag.setEnabled(usable)
+        self.flag.setChecked(self.blacklisted)
+        self.flag.setToolTip("已在黑名單（再點一次移除）" if self.blacklisted else "加入黑名單")
+        self.black_tag.setVisible(self.blacklisted)
+        self._restyle()
 
     def set_skeleton(self):
         """查詢中：灰色佔位方塊。"""
@@ -372,8 +416,11 @@ class PlayerCard(QFrame):
         self.result = r
         self.clear_skeleton()
         self.tiles.set_games([])
+        self.streak.hide()
         self.feed_tag.hide()
         self.show_champion()
+        self.puuid = "" if r.error else (r.puuid or "")
+        self.show_blacklist()
         if r.error:
             if r.error.kind == "key":
                 self.big.setText(grey("—")); self.big.setToolTip("")
@@ -392,8 +439,15 @@ class PlayerCard(QFrame):
             self.kda.setText(kda_html(s.kda, s.kd))
         else:
             self.big.setText(grey("近期沒有對戰")); self.kda.setText("")
-        self.tiles.set_games(game_summaries(r.puuid, r.matches, self.win.feeding()))  # 全是重開局時統計為空，方塊仍列出
-        self.feed_tag.setVisible(any(g.feeding for g in self.tiles.games))
+        games = game_summaries(r.puuid, r.matches, self.win.feeding())
+        self.tiles.set_games(games)  # 全是重開局時統計為空，方塊仍列出
+        self.feed_tag.setVisible(any(x.feeding for x in games))
+        self.win.prefetch_tip_icons(games)
+        if st := streak(games):
+            color, bg = (GREEN, "#2e4a3a") if st.win else (RED, "#4a2e2e")
+            self.streak.setText(f"{'連勝' if st.win else '連敗'} {st.games}")
+            self.streak.setStyleSheet(f"background:{bg};color:{color};border-radius:10px;padding:2px 8px;")
+            self.streak.show()
         e = r.encounter
         if e:
             when = "上一場" if e.games_ago == 0 else f"{e.games_ago + 1} 場前"
@@ -416,11 +470,28 @@ class PlayerCard(QFrame):
         self.rank.setText(" · ".join(parts)); self.rank.setToolTip("\n".join(tips))
 
     def _tile_tip(self, g: GameSummary) -> str:
-        return (f"{self.win.icon_html(g.champion, 32)}<br><b>{self.win.champions.name(g.champion)}</b> "
-                f"{g.kills}/{g.deaths}/{g.assists}<br>{grey(g.mode)}"
-                + (f"<br>{grey('重開局（不計入統計）')}" if g.remake else "")
-                + (f"<br><span style='color:{NEON}'>送頭場：死亡 {g.deaths} · KDA {g.kda:.2f} · KD {g.kd:.2f}</span>"
-                   if g.feeding else ""))
+        """單場提示框：英雄頭像、K/D/A 與勝敗、英雄與模式、裝備列、主符文與召喚師技能列；圖示缺少時以文字替代。
+        rows 是表格的列，之後的單場說明（例如送頭場）接在最後。"""
+        w, c = self.win, self.win.champions
+        result = f"<span style='color:{GREEN if g.win else RED}'>{'勝' if g.win else '敗'}</span>"
+        head = w.icon_html(g.champion, 44)
+        rows = [f"<tr>{f'<td rowspan=2>{head}</td>' if head else ''}"
+                f"<td><b style='font-size:15px'>{g.kills} / {g.deaths} / {g.assists}</b> {result}</td></tr>",
+                f"<tr><td><b>{c.name(g.champion)}</b> {grey(g.mode)}</td></tr>"]
+        if g.items:
+            rows.append(f"<tr><td colspan='2' style='padding-top:4px'>"
+                        f"{'&nbsp;'.join(w.asset_html(c.item(i), 26) for i in g.items)}</td></tr>")
+        rune = c.rune(g.keystone) if g.keystone else None
+        icons = ([w.asset_html(rune, 24, fallback="")] if rune else []) + [w.asset_html(c.spell(s), 22) for s in g.spells]
+        if rune or g.spells:
+            rows.append(f"<tr><td colspan='2'>{'&nbsp;'.join(i for i in icons if i)}"
+                        f"{'&nbsp;' + grey(rune.name) if rune else ''}</td></tr>")
+        if g.remake:
+            rows.append(f"<tr><td colspan='2'>{grey('重開局（不計入統計）')}</td></tr>")
+        if g.feeding:
+            rows.append(f"<tr><td colspan='2' style='color:{NEON};padding-top:4px'>"
+                        f"送頭場：死亡 {g.deaths} · KDA {g.kda:.2f} · KD {g.kd:.2f}</td></tr>")
+        return f"<table cellspacing='0' cellpadding='2'>{''.join(rows)}</table>"
 
     def set_champion(self, key: int | None, m: Mastery | None = None, *, loaded: bool = False):
         """設定本場英雄；loaded=True 代表熟練度已查完（m 為 None 即沒玩過）。"""
@@ -574,6 +645,8 @@ class MainWindow(QMainWindow):
         self.pending: tuple[list[RiotId], bool, bool] | None = None  # (成員, 自動, 強制重查)
         self.key_warming = False  # 新 Key 還沒被 Riot 啟用
         self.icons_loading: set[str] = set()
+        self.assets_ready: set[str] = set()  # 已在本機的提示框圖示，免得每次重畫都查檔案
+        self.asset_slots = threading.Semaphore(4)  # 提示框圖示一次可能上百個，限制同時下載數
         self.key_bad = False
         self.key_note = ""
         self.waiting_key = False
@@ -893,6 +966,40 @@ class MainWindow(QMainWindow):
                     pass
             threading.Thread(target=load, daemon=True).start()
         return None
+
+    def asset_html(self, icon: Icon, size: int, fallback: str | None = None) -> str:
+        """裝備／符文／召喚師技能的 <img>；還沒下載好時是 fallback（預設為灰色的名稱）。"""
+        path = self.asset_file(icon)
+        if path is None:
+            return grey(icon.name) if fallback is None else fallback
+        return f"<img src='{QUrl.fromLocalFile(str(path)).toString()}' width={size} height={size} align=middle>"
+
+    def asset_file(self, icon: Icon) -> Path | None:
+        """裝備／符文／召喚師技能圖示的本機檔案；本機還沒有就排進背景下載，先回 None。
+        這些圖示只出現在提示框（滑鼠停上去才產生），下載好不必重畫卡片。"""
+        path = icon_dir() / icon.file
+        if icon.file in self.assets_ready or path.exists():
+            self.assets_ready.add(icon.file)
+            return path
+        if icon.url and icon.file not in self.icons_loading:
+            self.icons_loading.add(icon.file)
+
+            def load():
+                with self.asset_slots:
+                    try:
+                        download_asset(icon)
+                    except Exception:
+                        pass  # 斷網或下載失敗：提示框以文字替代
+            threading.Thread(target=load, daemon=True).start()
+        return None
+
+    def prefetch_tip_icons(self, games: list[GameSummary]):
+        """稽查結果回來後，在背景先下載單場提示框要用的圖示；已在本機的不重新下載。"""
+        c = self.champions
+        for g in games:
+            for icon in ([c.item(i) for i in g.items] + [c.spell(s) for s in g.spells]
+                         + ([c.rune(g.keystone)] if g.keystone else [])):
+                self.asset_file(icon)
 
     def open_opgg(self):
         members = [m for m in self.room or parse_room_messages(self.box.toPlainText()).members if not m.hidden]
