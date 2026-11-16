@@ -19,6 +19,10 @@ class Config:
     autostart: bool = False
     key_saved_at: float = 0.0  # epoch 秒；開發 Key 產生後 24 小時過期，以存入時間估算
     personal_key: bool = False  # Personal API Key 不會過期，不顯示倒數；字串上和開發 Key 分不出來，由使用者勾選
+    # 送頭場門檻：(KDA < kda_below 或 KD ≤ kd_at_most) 且 死亡 ≥ min_deaths
+    feeding_kda_below: float = 2.0
+    feeding_kd_at_most: float = 0.5
+    feeding_min_deaths: int = 10
     # 黑名單只存 PUUID（改名後仍認得）；PUUID 依 Key 類型加密，換 Key 類型會失效（使用者接受）
     blacklist: list[str] = field(default_factory=list)
 

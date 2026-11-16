@@ -76,6 +76,31 @@ class GameSummary:
     items: list[int] = field(default_factory=list)  # 結束時的裝備 id，依格子順序，空格略過
     keystone: int | None = None                     # 主符文 id；該模式沒有符文時為 None
     spells: list[int] = field(default_factory=list)  # 兩個召喚師技能的數字 key
+    feeding: bool = False  # 送頭場：方塊加青色霓虹框
+
+    @property
+    def kda(self) -> float:
+        """單場 KDA，算法與近期戰績的平均相同（死亡為 0 時以 1 計）。"""
+        return (self.kills + self.assists) / max(self.deaths, 1)
+
+    @property
+    def kd(self) -> float:
+        return self.kills / max(self.deaths, 1)
+
+
+@dataclass(frozen=True)
+class FeedingThresholds:
+    """送頭場的門檻：(KDA < kda_below 或 KD ≤ kd_at_most) 且 死亡 ≥ min_deaths。"""
+    kda_below: float = 2.0
+    kd_at_most: float = 0.5
+    min_deaths: int = 10
+
+
+def is_feeding(p: dict, t: FeedingThresholds = FeedingThresholds()) -> bool:
+    """送頭場：只看該玩家自己這一場的數字；重開局永遠不是送頭場。"""
+    if is_remake(p):
+        return False
+    return (_kda([p]) < t.kda_below or _kd([p]) <= t.kd_at_most) and p["deaths"] >= t.min_deaths
 
 
 def _mode(match: dict) -> str:
@@ -97,10 +122,12 @@ def _spells(p: dict) -> list[int]:
     return [s for n in (1, 2) if (s := p.get(f"summoner{n}Id", 0))]
 
 
-def game_summaries(puuid: str, matches: list[dict]) -> list[GameSummary]:
-    """近期戰績的每一場 → 單場摘要，新 → 舊；玩家不在的對戰略過。"""
+def game_summaries(puuid: str, matches: list[dict],
+                   feeding: FeedingThresholds = FeedingThresholds()) -> list[GameSummary]:
+    """近期戰績的每一場 → 單場摘要，新 → 舊；玩家不在的對戰略過。feeding：送頭場的門檻。"""
     return [GameSummary(p["win"], p["championName"], p["kills"], p["deaths"], p["assists"], _mode(m),
-                        remake=is_remake(p), items=_items(p), keystone=_keystone(p), spells=_spells(p))
+                        remake=is_remake(p), items=_items(p), keystone=_keystone(p), spells=_spells(p),
+                        feeding=is_feeding(p, feeding))
             for m in matches if (p := participant(m, puuid))]
 
 

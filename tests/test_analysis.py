@@ -1,5 +1,5 @@
-from bp_auditor.analysis import (STREAK_MIN, detect_premades, find_encounter, game_summaries, mastery, ranks,
-                                 recent_stats, split_game, streak)
+from bp_auditor.analysis import (STREAK_MIN, FeedingThresholds, detect_premades, find_encounter, game_summaries,
+                                 mastery, ranks, recent_stats, split_game, streak)
 
 
 def match(mid, team100, team200, *, win100=True, champ="Ahri", kda=(2, 1, 3), queue=450, mode="ARAM",
@@ -87,6 +87,58 @@ def test_game_summary_without_perks_or_spells():
 def test_game_summaries_flag_remake_but_not_normal_surrender():
     ms = [match("1", ["a"], ["x"], remake=True), match("2", ["a"], ["x"], surrender=True), match("3", ["a"], ["x"])]
     assert [g.remake for g in game_summaries("a", ms)] == [True, False, False]
+
+
+def _feeding(kda, remake=False, **thresholds):
+    """單場 K/D/A → 該場是否為送頭場（門檻未給就用預設 2／0.5／10）。"""
+    ms = [match("1", ["a"], ["x"], kda=kda, remake=remake)]
+    return game_summaries("a", ms, FeedingThresholds(**thresholds)).pop().feeding
+
+
+def test_feeding_game_when_only_kda_condition_met():
+    assert _feeding((6, 10, 12)) is True  # KDA 1.8 < 2，KD 0.6 > 0.5
+
+
+def test_feeding_game_when_only_kd_condition_met():
+    assert _feeding((4, 10, 30)) is True  # KDA 3.4 ≥ 2，KD 0.4 ≤ 0.5
+
+
+def test_feeding_game_when_both_conditions_met():
+    assert _feeding((1, 12, 2)) is True
+
+
+def test_not_feeding_game_when_deaths_below_threshold():
+    assert _feeding((0, 9, 0)) is False
+
+
+def test_feeding_game_kd_equal_to_threshold_counts():
+    assert _feeding((5, 10, 20)) is True  # KDA 2.5，KD 剛好 0.5
+
+
+def test_not_feeding_game_when_kda_equal_to_threshold():
+    assert _feeding((6, 10, 14)) is False  # KDA 剛好 2.0，KD 0.6
+
+
+def test_feeding_game_zero_deaths_counted_as_one():
+    assert _feeding((0, 0, 1), min_deaths=0) is True  # KDA 1.0、KD 0.0，不會除以零
+    assert _feeding((3, 0, 3), min_deaths=0) is False  # KDA 6、KD 3
+
+
+def test_custom_feeding_thresholds_change_the_judgement():
+    assert _feeding((1, 12, 2), min_deaths=15) is False
+    assert _feeding((3, 5, 2), min_deaths=5) is True
+    assert _feeding((6, 10, 14), kda_below=2.5) is True
+    assert _feeding((5, 10, 20), kd_at_most=0.4) is False
+
+
+def test_remake_never_a_feeding_game():
+    assert _feeding((0, 12, 0), remake=True) is False
+
+
+def test_game_summaries_default_thresholds_and_per_game_kda_kd():
+    g = game_summaries("a", [match("1", ["a"], ["x"], kda=(3, 12, 5))])[0]
+    assert (g.feeding, g.kda, g.kd) == (True, 8 / 12, 3 / 12)
+    assert game_summaries("a", [match("1", ["a"], ["x"], kda=(3, 0, 5))])[0].kda == 8.0
 
 
 def _games(*results):

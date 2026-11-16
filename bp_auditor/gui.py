@@ -10,15 +10,16 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QGuiApplication, QIcon, QPainter, QPainterPath,
-                           QImage, QPixmap)
+                           QImage, QPen, QPixmap)
 from PySide6.QtWidgets import (
-    QAbstractButton, QApplication, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QAbstractButton, QApplication, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
     QSpacerItem, QStackedWidget, QSystemTrayIcon, QToolTip, QVBoxLayout, QWidget,
 )
 
 from . import autostart, single
-from .analysis import GameSummary, Mastery, PremadeGroup, detect_premades, game_summaries, split_game, streak
+from .analysis import (FeedingThresholds, GameSummary, Mastery, PremadeGroup, detect_premades, game_summaries,
+                       split_game, streak)
 from .audit import ME, Audit, AuditOutcome, Me, PlayerResult
 from .champions import Champions, Icon, download_asset, download_icon, icon_dir, icon_path
 from .config import Config
@@ -28,6 +29,7 @@ from .riot import DEV_KEY_LIFETIME, KEY_PAGE, RateLimiter, RiotClient, RiotError
 GROUP_COLORS = ["#ffb300", "#ab47bc", "#29b6f6", "#ef6c00"]
 RED, GREEN, GREY, BLUE, ORANGE = "#ef5350", "#66bb6a", "#9e9e9e", "#90caf9", "#ffb300"
 SKELETON = "#323844"
+NEON = "#18ffff"  # 送頭場的霓虹框、提示框說明與標籤
 KEY_WARMUP = 180  # 新 Key 產生後最多等幾秒讓 Riot 啟用
 KEY_RECHECK_MS = 15_000
 GAME_POLL_DELAY_MS = 90_000  # 房間稽查完先等 90 秒（排隊＋選角）才開始問觀戰 API
@@ -39,7 +41,7 @@ ERROR_SHORT = {"not_found": "查無此人", "network": "連線失敗", "server":
 
 QSS = """
 QWidget{background:#1b1e24;color:#e0e0e0;font-family:'Microsoft JhengHei UI','Segoe UI';font-size:13px;}
-QPlainTextEdit,QLineEdit,QSpinBox{background:#262a33;border:1px solid #3a3f4b;border-radius:4px;padding:3px;}
+QPlainTextEdit,QLineEdit,QSpinBox,QDoubleSpinBox{background:#262a33;border:1px solid #3a3f4b;border-radius:4px;padding:3px;}
 QPushButton{background:#3949ab;border:none;border-radius:4px;padding:6px 14px;}
 QPushButton:hover{background:#5c6bc0;} QPushButton:disabled{background:#2d323c;color:#757575;}
 QPushButton#secondary,QPushButton#icon{background:#2d323c;}
@@ -230,10 +232,12 @@ class ChampionTiles(QWidget):
         s, gap, radius = self.tile, self._gap(), 4 if self.tile >= 32 else 3
         bar = max(s // 7, 3)  # 底部勝敗色條的高度
         cols = self._per_row(self.width())
-        self.rects = []
-        for i in range(self._count()):
-            r = QRectF(self.MARGIN + i % cols * (s + gap), self.MARGIN + i // cols * (s + gap), s, s)
-            self.rects.append(r)
+        self.rects = [QRectF(self.MARGIN + i % cols * (s + gap), self.MARGIN + i // cols * (s + gap), s, s)
+                      for i in range(self._count())]
+        feeding = [r for r, g in zip(self.rects, self.games or []) if g.feeding]
+        for r in feeding:  # 光暈先畫，相鄰方塊再蓋上去，光暈只留在間隙與邊距裡
+            self._glow(p, r, radius)
+        for i, r in enumerate(self.rects):
             if self.games is None:
                 p.setBrush(QColor(SKELETON)); p.drawRoundedRect(r, radius, radius)
                 continue
@@ -251,6 +255,16 @@ class ChampionTiles(QWidget):
                 p.fillRect(r, QColor(27, 30, 36, 110))
             p.fillRect(QRectF(r.left(), r.bottom() - bar, s, bar), QColor(GREY if g.remake else GREEN if g.win else RED))
             p.restore()
+        p.setPen(QPen(QColor(NEON), 1.5)); p.setBrush(Qt.NoBrush)
+        for r in feeding:  # 送頭場的實線外框，緊貼方塊外緣
+            p.drawRoundedRect(r.adjusted(-0.75, -0.75, 0.75, 0.75), radius + 0.75, radius + 0.75)
+
+    def _glow(self, p: QPainter, r: QRectF, radius: float):
+        """送頭場的靜態青色光暈：由外而內 5 層，越內層越不透明；最外層剛好到 MARGIN 邊距。"""
+        c = QColor(NEON)
+        for grow, alpha in ((6, 18), (5, 26), (4, 38), (3, 55), (2, 80)):
+            c.setAlpha(alpha); p.setBrush(c)
+            p.drawRoundedRect(r.adjusted(-grow, -grow, grow, grow), radius + grow, radius + grow)
 
     def event(self, e):
         if e.type() == QEvent.ToolTip and self.games:
@@ -321,8 +335,12 @@ class PlayerCard(QFrame):
         self.black_tag.setStyleSheet(f"background:{RED};color:#1b1e24;font-weight:bold;border-radius:10px;padding:2px 9px;")
         self.streak = QLabel(); self.streak.hide()  # 連勝／連敗
         self.chip = QLabel(); self.chip.hide()
-        self.tags.addWidget(self.black_tag); self.tags.addWidget(self.streak); self.tags.addWidget(self.chip)
-        self.tags.addStretch()
+        self.feed_tag = QLabel("送頭"); self.feed_tag.hide()  # 近期戰績有任一場送頭場；排在相遇之前
+        self.feed_tag.setStyleSheet(f"background:#12303a;color:{NEON};border:1px solid {NEON};"
+                                    "border-radius:10px;padding:2px 9px;")
+        self.feed_tag.setToolTip("有青色霓虹框的那幾場；滑鼠移到方塊上看細節")
+        self.tags.addWidget(self.black_tag); self.tags.addWidget(self.streak); self.tags.addWidget(self.feed_tag)
+        self.tags.addWidget(self.chip); self.tags.addStretch()
         v.addLayout(self.tags)
         self.bottom = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Minimum)
         v.addItem(self.bottom)
@@ -399,6 +417,7 @@ class PlayerCard(QFrame):
         self.clear_skeleton()
         self.tiles.set_games([])
         self.streak.hide()
+        self.feed_tag.hide()
         self.show_champion()
         self.puuid = "" if r.error else (r.puuid or "")
         self.show_blacklist()
@@ -420,8 +439,9 @@ class PlayerCard(QFrame):
             self.kda.setText(kda_html(s.kda, s.kd))
         else:
             self.big.setText(grey("近期沒有對戰")); self.kda.setText("")
-        games = game_summaries(r.puuid, r.matches)
+        games = game_summaries(r.puuid, r.matches, self.win.feeding())
         self.tiles.set_games(games)  # 全是重開局時統計為空，方塊仍列出
+        self.feed_tag.setVisible(any(x.feeding for x in games))
         self.win.prefetch_tip_icons(games)
         if st := streak(games):
             color, bg = (GREEN, "#2e4a3a") if st.win else (RED, "#4a2e2e")
@@ -468,6 +488,9 @@ class PlayerCard(QFrame):
                         f"{'&nbsp;' + grey(rune.name) if rune else ''}</td></tr>")
         if g.remake:
             rows.append(f"<tr><td colspan='2'>{grey('重開局（不計入統計）')}</td></tr>")
+        if g.feeding:
+            rows.append(f"<tr><td colspan='2' style='color:{NEON};padding-top:4px'>"
+                        f"送頭場：死亡 {g.deaths} · KDA {g.kda:.2f} · KD {g.kd:.2f}</td></tr>")
         return f"<table cellspacing='0' cellpadding='2'>{''.join(rows)}</table>"
 
     def set_champion(self, key: int | None, m: Mastery | None = None, *, loaded: bool = False):
@@ -541,6 +564,19 @@ class SettingsPage(QWidget):
             self.boot.setEnabled(False); self.boot.setToolTip("只有打包後的 exe 能用")
         f.addRow("開機時啟動", self.boot)
 
+        # 送頭場判定：(KDA 低於 或 KD 不高於) 且 死亡至少；改了立即存檔並重畫卡片，不重新稽查
+        head = QLabel("<b>送頭場判定</b>"); head.setStyleSheet("padding-top:10px;"); f.addRow(head)
+        self.feed_kda = QDoubleSpinBox(); self.feed_kda.setRange(0, 20); self.feed_kda.setDecimals(2)
+        self.feed_kda.setSingleStep(0.1); self.feed_kda.setValue(cfg.feeding_kda_below)
+        self.feed_kd = QDoubleSpinBox(); self.feed_kd.setRange(0, 10); self.feed_kd.setDecimals(2)
+        self.feed_kd.setSingleStep(0.05); self.feed_kd.setValue(cfg.feeding_kd_at_most)
+        self.feed_deaths = QSpinBox(); self.feed_deaths.setRange(0, 50); self.feed_deaths.setSuffix(" 次")
+        self.feed_deaths.setValue(cfg.feeding_min_deaths)
+        for label, box in (("KDA 低於", self.feed_kda), ("KD 不高於", self.feed_kd), ("死亡至少", self.feed_deaths)):
+            box.setKeyboardTracking(False); box.valueChanged.connect(self.save_feeding)
+            f.addRow(label, box)
+        f.addRow("", QLabel(grey("（KDA 低於 或 KD 不高於）且 死亡至少 → 送頭場")))
+
     def save_key(self):
         key = self.key.text().strip()
         if key != self.win.cfg.api_key:
@@ -584,6 +620,13 @@ class SettingsPage(QWidget):
     def save_autostart(self, on: bool):
         self.win.cfg.autostart = on; self.win.cfg.save()
         autostart.apply(on)
+
+    def save_feeding(self):
+        cfg = self.win.cfg
+        cfg.feeding_kda_below, cfg.feeding_kd_at_most = self.feed_kda.value(), self.feed_kd.value()
+        cfg.feeding_min_deaths = self.feed_deaths.value()
+        cfg.save()
+        self.win.refresh_cards()  # 用記憶體裡的對戰重算，不發 Riot API 請求
 
 
 class MainWindow(QMainWindow):
@@ -894,6 +937,11 @@ class MainWindow(QMainWindow):
                 c.show_result(c.result)
             else:
                 c.show_champion()
+
+    def feeding(self) -> FeedingThresholds:
+        """設定頁的送頭場門檻。"""
+        c = self.cfg
+        return FeedingThresholds(c.feeding_kda_below, c.feeding_kd_at_most, c.feeding_min_deaths)
 
     def icon_html(self, champion_id: str, size: int) -> str:
         """英雄頭像的 <img>；還沒下載好時是空字串。"""
