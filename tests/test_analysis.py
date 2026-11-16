@@ -2,13 +2,15 @@ from bp_auditor.analysis import (detect_premades, find_encounter, game_summaries
                                  split_game)
 
 
-def match(mid, team100, team200, *, win100=True, champ="Ahri", kda=(2, 1, 3), queue=450, mode="ARAM"):
-    """team100/team200: puuid 清單。"""
+def match(mid, team100, team200, *, win100=True, champ="Ahri", kda=(2, 1, 3), queue=450, mode="ARAM",
+          remake=False, surrender=False):
+    """team100/team200: puuid 清單。remake=True：重開局（提早投降）；surrender=True：一般投降。"""
     ps = []
     for team, members, win in ((100, team100, win100), (200, team200, not win100)):
         for pu in members:
             ps.append(dict(puuid=pu, teamId=team, win=win, championName=champ, summonerLevel=100,
-                           kills=kda[0], deaths=kda[1], assists=kda[2]))
+                           kills=kda[0], deaths=kda[1], assists=kda[2],
+                           gameEndedInEarlySurrender=remake, gameEndedInSurrender=surrender))
     return {"metadata": {"matchId": mid}, "info": {"participants": ps, "queueId": queue, "gameMode": mode}}
 
 
@@ -18,6 +20,25 @@ def test_recent_stats():
     assert (s.games, s.wins, s.results, s.level) == (2, 1, [True, False], 100)
     assert s.kda == 5.0
     assert s.kd == 2.0
+
+
+def _stats_tuple(s):
+    return (s.games, s.wins, s.win_rate, s.kda, s.kd, s.results)
+
+
+def test_recent_stats_exclude_remake_same_as_without_it():
+    normal = [match("1", ["a"], ["x"], kda=(4, 2, 6)), match("3", ["x"], ["a"], kda=(1, 3, 2))]
+    remake = match("2", ["a"], ["x"], win100=True, kda=(9, 0, 9), remake=True)
+    with_remake = recent_stats("a", [normal[0], remake, normal[1]])
+    assert _stats_tuple(with_remake) == _stats_tuple(recent_stats("a", normal))
+    assert (with_remake.games, with_remake.wins) == (2, 1)
+
+
+def test_recent_stats_all_remakes_same_as_no_games():
+    ms = [match("1", ["a"], ["x"], remake=True), match("2", ["x"], ["a"], remake=True)]
+    s = recent_stats("a", ms)
+    assert _stats_tuple(s) == _stats_tuple(recent_stats("a", []))
+    assert (s.games, s.win_rate) == (0, 0.0)
 
 
 def test_game_summaries_newest_first_with_result_champion_and_kda():
@@ -38,6 +59,11 @@ def test_game_summaries_mode_from_queue_falling_back_to_game_mode():
     ms = [match("1", ["a"], [], queue=450), match("2", ["a"], [], queue=420),
           match("3", ["a"], [], queue=9999, mode="NEXUSBLITZ")]
     assert [g.mode for g in game_summaries("a", ms)] == ["ARAM", "單雙", "NEXUSBLITZ"]
+
+
+def test_game_summaries_flag_remake_but_not_normal_surrender():
+    ms = [match("1", ["a"], ["x"], remake=True), match("2", ["a"], ["x"], surrender=True), match("3", ["a"], ["x"])]
+    assert [g.remake for g in game_summaries("a", ms)] == [True, False, False]
 
 
 def test_premade_streak_from_most_recent():

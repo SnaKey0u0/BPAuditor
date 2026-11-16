@@ -43,15 +43,22 @@ class RecentStats:
         return self.wins / self.games if self.games else 0.0
 
 
+def is_remake(p: dict) -> bool:
+    """重開局：Riot 把該玩家這場標成提早投降結束（一般投降不算）。"""
+    return bool(p.get("gameEndedInEarlySurrender"))
+
+
 def recent_stats(puuid: str, matches: list[dict]) -> RecentStats:
-    ps = [p for m in matches if (p := participant(m, puuid))]
+    """近期戰績的統計；重開局不計入（不補抓場次），玩家等級仍取最近一場。"""
+    played = [p for m in matches if (p := participant(m, puuid))]
+    ps = [p for p in played if not is_remake(p)]
     return RecentStats(
         games=len(ps),
         wins=sum(p["win"] for p in ps),
         kda=_kda(ps),
         kd=_kd(ps),
         results=[p["win"] for p in ps],
-        level=ps[0].get("summonerLevel") if ps else None,
+        level=played[0].get("summonerLevel") if played else None,
     )
 
 
@@ -64,6 +71,7 @@ class GameSummary:
     deaths: int
     assists: int
     mode: str      # 佇列的顯示名稱（例如 ARAM、單雙）；不認得的佇列用 gameMode
+    remake: bool = False  # 重開局：列出但不計入統計，方塊以灰色呈現
 
 
 def _mode(match: dict) -> str:
@@ -73,7 +81,8 @@ def _mode(match: dict) -> str:
 
 def game_summaries(puuid: str, matches: list[dict]) -> list[GameSummary]:
     """近期戰績的每一場 → 單場摘要，新 → 舊；玩家不在的對戰略過。"""
-    return [GameSummary(p["win"], p["championName"], p["kills"], p["deaths"], p["assists"], _mode(m))
+    return [GameSummary(p["win"], p["championName"], p["kills"], p["deaths"], p["assists"], _mode(m),
+                        remake=is_remake(p))
             for m in matches if (p := participant(m, puuid))]
 
 
