@@ -151,7 +151,7 @@ class ChampionTiles(QWidget):
     """近期戰績的英雄頭像方塊：由新到舊，底部綠／紅條表示該場勝敗；每場有各自的提示框。
 
     每列最多 PER_ROW 個，超過換列；卡片比較窄時（視窗縮小、對局的兩隊畫面）也會提早換列，
-    方塊列不會把卡片撐寬。四周留 MARGIN 邊距，之後送頭場的光暈畫在這裡。
+    方塊列不會把卡片撐寬。四周留 MARGIN 邊距，送頭場的光暈畫在這裡。
     """
     PER_ROW = 10
     MARGIN = 6
@@ -280,7 +280,7 @@ class ChampionTiles(QWidget):
 
 class PlayerCard(QFrame):
     """一位玩家的卡片，分三段：
-    - 標題列：名稱、等級、牌位；右上角的 header_right 預留給之後的「!」黑名單按鈕。
+    - 標題列：名稱、等級、牌位；右上角的 header_right 放「!」黑名單按鈕。
     - 中段：勝率、英雄頭像方塊、KDA／KD；對局中再加一行本場英雄的熟練度。
     - 標籤列 tags：相遇等小標籤，靠左排。
     """
@@ -471,7 +471,7 @@ class PlayerCard(QFrame):
 
     def _tile_tip(self, g: GameSummary) -> str:
         """單場提示框：英雄頭像、K/D/A 與勝敗、英雄與模式、裝備列、主符文與召喚師技能列；圖示缺少時以文字替代。
-        rows 是表格的列，之後的單場說明（例如送頭場）接在最後。"""
+        rows 是表格的列，單場說明（重開局、送頭場）接在最後。"""
         w, c = self.win, self.win.champions
         result = f"<span style='color:{GREEN if g.win else RED}'>{'勝' if g.win else '敗'}</span>"
         head = w.icon_html(g.champion, 44)
