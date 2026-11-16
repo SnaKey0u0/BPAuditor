@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 from . import autostart, single
 from .analysis import GameSummary, Mastery, PremadeGroup, detect_premades, game_summaries, split_game, streak
 from .audit import ME, Audit, AuditOutcome, Me, PlayerResult
-from .champions import Champions, download_icon, icon_path
+from .champions import Champions, Icon, download_asset, download_icon, icon_dir, icon_path
 from .config import Config
 from .parsing import RiotId, members_to_query, parse_room_messages, room_change, room_members_in_clipboard
 from .riot import DEV_KEY_LIFETIME, KEY_PAGE, RateLimiter, RiotClient, RiotError, find_api_key
@@ -422,6 +422,7 @@ class PlayerCard(QFrame):
             self.big.setText(grey("近期沒有對戰")); self.kda.setText("")
         games = game_summaries(r.puuid, r.matches)
         self.tiles.set_games(games)  # 全是重開局時統計為空，方塊仍列出
+        self.win.prefetch_tip_icons(games)
         if st := streak(games):
             color, bg = (GREEN, "#2e4a3a") if st.win else (RED, "#4a2e2e")
             self.streak.setText(f"{'連勝' if st.win else '連敗'} {st.games}")
@@ -449,9 +450,25 @@ class PlayerCard(QFrame):
         self.rank.setText(" · ".join(parts)); self.rank.setToolTip("\n".join(tips))
 
     def _tile_tip(self, g: GameSummary) -> str:
-        return (f"{self.win.icon_html(g.champion, 32)}<br><b>{self.win.champions.name(g.champion)}</b> "
-                f"{g.kills}/{g.deaths}/{g.assists}<br>{grey(g.mode)}"
-                + (f"<br>{grey('重開局（不計入統計）')}" if g.remake else ""))
+        """單場提示框：英雄頭像、K/D/A 與勝敗、英雄與模式、裝備列、主符文與召喚師技能列；圖示缺少時以文字替代。
+        rows 是表格的列，之後的單場說明（例如送頭場）接在最後。"""
+        w, c = self.win, self.win.champions
+        result = f"<span style='color:{GREEN if g.win else RED}'>{'勝' if g.win else '敗'}</span>"
+        head = w.icon_html(g.champion, 44)
+        rows = [f"<tr>{f'<td rowspan=2>{head}</td>' if head else ''}"
+                f"<td><b style='font-size:15px'>{g.kills} / {g.deaths} / {g.assists}</b> {result}</td></tr>",
+                f"<tr><td><b>{c.name(g.champion)}</b> {grey(g.mode)}</td></tr>"]
+        if g.items:
+            rows.append(f"<tr><td colspan='2' style='padding-top:4px'>"
+                        f"{'&nbsp;'.join(w.asset_html(c.item(i), 26) for i in g.items)}</td></tr>")
+        rune = c.rune(g.keystone) if g.keystone else None
+        icons = ([w.asset_html(rune, 24, fallback="")] if rune else []) + [w.asset_html(c.spell(s), 22) for s in g.spells]
+        if rune or g.spells:
+            rows.append(f"<tr><td colspan='2'>{'&nbsp;'.join(i for i in icons if i)}"
+                        f"{'&nbsp;' + grey(rune.name) if rune else ''}</td></tr>")
+        if g.remake:
+            rows.append(f"<tr><td colspan='2'>{grey('重開局（不計入統計）')}</td></tr>")
+        return f"<table cellspacing='0' cellpadding='2'>{''.join(rows)}</table>"
 
     def set_champion(self, key: int | None, m: Mastery | None = None, *, loaded: bool = False):
         """設定本場英雄；loaded=True 代表熟練度已查完（m 為 None 即沒玩過）。"""
@@ -585,6 +602,8 @@ class MainWindow(QMainWindow):
         self.pending: tuple[list[RiotId], bool, bool] | None = None  # (成員, 自動, 強制重查)
         self.key_warming = False  # 新 Key 還沒被 Riot 啟用
         self.icons_loading: set[str] = set()
+        self.assets_ready: set[str] = set()  # 已在本機的提示框圖示，免得每次重畫都查檔案
+        self.asset_slots = threading.Semaphore(4)  # 提示框圖示一次可能上百個，限制同時下載數
         self.key_bad = False
         self.key_note = ""
         self.waiting_key = False
@@ -899,6 +918,40 @@ class MainWindow(QMainWindow):
                     pass
             threading.Thread(target=load, daemon=True).start()
         return None
+
+    def asset_html(self, icon: Icon, size: int, fallback: str | None = None) -> str:
+        """裝備／符文／召喚師技能的 <img>；還沒下載好時是 fallback（預設為灰色的名稱）。"""
+        path = self.asset_file(icon)
+        if path is None:
+            return grey(icon.name) if fallback is None else fallback
+        return f"<img src='{QUrl.fromLocalFile(str(path)).toString()}' width={size} height={size} align=middle>"
+
+    def asset_file(self, icon: Icon) -> Path | None:
+        """裝備／符文／召喚師技能圖示的本機檔案；本機還沒有就排進背景下載，先回 None。
+        這些圖示只出現在提示框（滑鼠停上去才產生），下載好不必重畫卡片。"""
+        path = icon_dir() / icon.file
+        if icon.file in self.assets_ready or path.exists():
+            self.assets_ready.add(icon.file)
+            return path
+        if icon.url and icon.file not in self.icons_loading:
+            self.icons_loading.add(icon.file)
+
+            def load():
+                with self.asset_slots:
+                    try:
+                        download_asset(icon)
+                    except Exception:
+                        pass  # 斷網或下載失敗：提示框以文字替代
+            threading.Thread(target=load, daemon=True).start()
+        return None
+
+    def prefetch_tip_icons(self, games: list[GameSummary]):
+        """稽查結果回來後，在背景先下載單場提示框要用的圖示；已在本機的不重新下載。"""
+        c = self.champions
+        for g in games:
+            for icon in ([c.item(i) for i in g.items] + [c.spell(s) for s in g.spells]
+                         + ([c.rune(g.keystone)] if g.keystone else [])):
+                self.asset_file(icon)
 
     def open_opgg(self):
         members = [m for m in self.room or parse_room_messages(self.box.toPlainText()).members if not m.hidden]
