@@ -5,18 +5,20 @@ import sys
 import threading
 import time
 import urllib.parse
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QGuiApplication, QIcon, QPainter
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QGuiApplication, QIcon, QPainter, QPainterPath,
+                           QPixmap)
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
-    QStackedWidget, QSystemTrayIcon, QToolTip, QVBoxLayout, QWidget,
+    QSpacerItem, QStackedWidget, QSystemTrayIcon, QToolTip, QVBoxLayout, QWidget,
 )
 
 from . import autostart, single
-from .analysis import Mastery, PremadeGroup, detect_premades, participant, split_game
+from .analysis import GameSummary, Mastery, PremadeGroup, detect_premades, game_summaries, split_game
 from .audit import ME, Audit, AuditOutcome, Me, PlayerResult
 from .champions import Champions, download_icon, icon_path
 from .config import Config
@@ -32,8 +34,7 @@ GAME_POLL_DELAY_MS = 90_000  # 房間稽查完先等 90 秒（排隊＋選角）
 GAME_POLL_MS = 20_000  # 之後每 20 秒問一次，看開局了沒
 GAME_POLL_FOR = 15 * 60  # 開始問之後最多問這麼久
 GAME_WIDTH = 1100  # 左右兩隊時視窗至少這麼寬
-QUEUES = {450: "ARAM", 420: "單雙", 440: "彈性", 400: "一般", 430: "一般", 490: "快速", 1700: "競技場",
-          900: "URF", 1900: "URF", 1300: "極限"}
+KDA_GOOD, KD_GOOD = 3, 1  # 平均 KDA／KD 達到這個值顯示綠色，否則紅色
 ERROR_SHORT = {"not_found": "查無此人", "network": "連線失敗", "server": "伺服器錯誤", "blocked": "連線被擋"}
 
 QSS = """
@@ -65,6 +66,13 @@ def wr_color(rate: float) -> str:
 
 def grey(text: str) -> str:
     return f"<span style='color:{GREY}'>{text}</span>"
+
+
+def kda_html(kda: float, kd: float) -> str:
+    """平均 KDA < 3、KD < 1 紅色，否則綠色；兩者同字體大小，上下兩行。"""
+    def line(label: str, value: float, good: float) -> str:
+        return f"{grey(label)} <b style='color:{GREEN if value >= good else RED}'>{value:.1f}</b>"
+    return f"<span style='font-size:15px'>{line('KDA', kda, KDA_GOOD)}<br>{line('KD', kd, KD_GOOD)}</span>"
 
 
 def resource(name: str) -> Path:
@@ -137,61 +145,113 @@ class Switch(QAbstractButton):
             p.drawText(QRectF(46, 0, self.width() - 46, self.height()), Qt.AlignVCenter, self.text())
 
 
-class ResultBars(QWidget):
-    """近期戰績的勝敗長條：贏的朝上（綠）、輸的朝下（紅），由新到舊；每場有各自的提示框。
+class ChampionTiles(QWidget):
+    """近期戰績的英雄頭像方塊：由新到舊，底部綠／紅條表示該場勝敗；每場有各自的提示框。
 
-    用上下方向表示勝敗，不靠顏色也看得懂。位置以實際螢幕像素計算：125% 這類非整數縮放下，
-    邏輯座標會落在半個像素上，反鋸齒的淡邊會讓長條寬窄、間距不一。
+    每列最多 PER_ROW 個，超過換列；卡片比較窄時（視窗縮小、對局的兩隊畫面）也會提早換列，
+    方塊列不會把卡片撐寬。四周留 MARGIN 邊距，之後送頭場的光暈畫在這裡。
     """
-    BAR, GAP, HALF = 5, 2, 8  # 邏輯像素：長條寬、間距、基準線上下各自的高度
+    PER_ROW = 10
+    MARGIN = 6
+    PLACEHOLDER = 5  # 查詢中顯示幾個灰色佔位方塊
+    ROOM, GAME = 32, 24  # 方塊邊長：房間畫面、對局的兩隊畫面
+    _pixmaps: dict[str, QPixmap] = {}  # 頭像檔案路徑 → 已載入的圖
 
-    def __init__(self):
+    def __init__(self, icon_file: Callable[[str], Path | None], tip: Callable[[GameSummary], str]):
+        """icon_file：英雄 id → 本機頭像檔（還沒下載好回 None）；tip：單場摘要 → 提示框內容。"""
         super().__init__()
-        self.items: list[tuple[bool, str]] | None = None  # None = 查詢中（灰色佔位）
+        self.icon_file, self.tip = icon_file, tip
+        self.games: list[GameSummary] | None = None  # None = 查詢中（灰色佔位）
+        self.tile = self.ROOM
+        self.rects: list[QRectF] = []
         self.setMouseTracking(True)
 
-    def set_items(self, items):
-        self.items = items
+    def set_games(self, games: list[GameSummary] | None):
+        self.games = games
+        self.setVisible(games is None or bool(games))
         self.updateGeometry(); self.update()
 
-    def _metrics(self, dpr: float) -> tuple[int, int, int]:
-        """(長條寬, 間距, 半高)，以實際像素計。"""
-        return tuple(max(round(v * dpr), 1) for v in (self.BAR, self.GAP, self.HALF))
+    def set_tile_size(self, px: int):
+        if px != self.tile:
+            self.tile = px
+            self.updateGeometry(); self.update()
+
+    def _gap(self) -> int:
+        return 6 if self.tile >= 32 else 4
+
+    def _count(self) -> int:
+        return self.PLACEHOLDER if self.games is None else len(self.games)
+
+    def _per_row(self, width: int) -> int:
+        """給定寬度下每列放幾個：最多 PER_ROW 個，至少 1 個。"""
+        step = self.tile + self._gap()
+        fit = (width - 2 * self.MARGIN + self._gap()) // step
+        return max(1, min(self.PER_ROW, self._count(), fit))
+
+    def _extent(self, n: int) -> int:
+        """n 個方塊排成一列（或一欄）的長度，含兩端邊距。"""
+        return n * (self.tile + self._gap()) - self._gap() + 2 * self.MARGIN
 
     def sizeHint(self):
-        n = 10 if self.items is None else len(self.items)
-        dpr = self.devicePixelRatioF(); bar, gap, _ = self._metrics(dpr)
-        return QSize(math.ceil(max(n * (bar + gap) - gap, 0) / dpr), 2 * self.HALF + 2)
+        n = self._count()
+        cols = min(n, self.PER_ROW)
+        return QSize(self._extent(cols), self._extent(math.ceil(n / cols))) if n else QSize(0, 0)
 
     def minimumSizeHint(self):
-        return self.sizeHint()
+        return QSize(self._extent(1), self._extent(1))
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, w: int) -> int:
+        n = self._count()
+        return self._extent(math.ceil(n / self._per_row(w))) if n else 0
+
+    def _pixmap(self, champion: str) -> QPixmap | None:
+        path = self.icon_file(champion)
+        if path is None:
+            return None
+        key = str(path)
+        if key not in self._pixmaps:
+            pm = QPixmap(key)
+            if pm.isNull():
+                return None
+            self._pixmaps[key] = pm
+        return self._pixmaps[key]
 
     def paintEvent(self, e):
         p = QPainter(self)
-        t = p.deviceTransform(); dpr = t.m11()
-        bar, gap, half = self._metrics(dpr)
-        x0 = round(t.dx()); base = round(t.dy() + (self.height() * dpr - 1) / 2)  # 基準線那一列像素
-        width = round(self.width() * dpr)
-
-        def rect(x: int, y: int, w: int, h: int) -> QRectF:  # 實際像素 → 邏輯座標，四邊都落在整數像素上
-            return QRectF((x - t.dx()) / dpr, (y - t.dy()) / dpr, w / dpr, h / dpr)
-
+        p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         p.setPen(Qt.NoPen)
-        if self.items is None:
-            p.setBrush(QColor(SKELETON)); p.drawRect(rect(x0, base - half, width, 2 * half + 1))
-            return
-        p.setBrush(QColor("#3a3f4b")); p.drawRect(rect(x0, base, width, 1))
-        for i, (win, _) in enumerate(self.items):
-            x = x0 + i * (bar + gap)
-            p.setBrush(QColor(GREEN if win else RED))
-            p.drawRect(rect(x, base - half, bar, half) if win else rect(x, base + 1, bar, half))
+        s, gap, radius = self.tile, self._gap(), 4 if self.tile >= 32 else 3
+        bar = max(s // 7, 3)  # 底部勝敗色條的高度
+        cols = self._per_row(self.width())
+        self.rects = []
+        for i in range(self._count()):
+            r = QRectF(self.MARGIN + i % cols * (s + gap), self.MARGIN + i // cols * (s + gap), s, s)
+            self.rects.append(r)
+            if self.games is None:
+                p.setBrush(QColor(SKELETON)); p.drawRoundedRect(r, radius, radius)
+                continue
+            g = self.games[i]
+            clip = QPainterPath(); clip.addRoundedRect(r, radius, radius)
+            p.save(); p.setClipPath(clip)
+            pm = self._pixmap(g.champion)
+            if pm:
+                p.drawPixmap(r, pm, QRectF(pm.rect()))
+            else:  # 頭像還沒下載好：灰底加英雄 id 前兩個字母
+                p.fillRect(r, QColor("#3a3f4b"))
+                p.setPen(QColor(GREY)); p.drawText(r.adjusted(0, 0, 0, -bar), Qt.AlignCenter, g.champion[:2])
+                p.setPen(Qt.NoPen)
+            p.fillRect(QRectF(r.left(), r.bottom() - bar, s, bar), QColor(GREEN if g.win else RED))
+            p.restore()
 
     def event(self, e):
-        if e.type() == QEvent.ToolTip and self.items:
-            dpr = self.devicePixelRatioF(); bar, gap, _ = self._metrics(dpr)
-            i = int(e.pos().x() * dpr // (bar + gap))
-            if 0 <= i < len(self.items):
-                QToolTip.showText(e.globalPos(), self.items[i][1], self)
+        if e.type() == QEvent.ToolTip and self.games:
+            pad = self._gap() / 2
+            i = next((i for i, r in enumerate(self.rects) if r.adjusted(-pad, -pad, pad, pad).contains(e.pos())), None)
+            if i is not None and i < len(self.games):
+                QToolTip.showText(e.globalPos(), self.tip(self.games[i]), self)
             else:
                 QToolTip.hideText()
             return True
@@ -199,6 +259,12 @@ class ResultBars(QWidget):
 
 
 class PlayerCard(QFrame):
+    """一位玩家的卡片，分三段：
+    - 標題列：名稱、等級、牌位；右上角的 header_right 預留給之後的「!」黑名單按鈕。
+    - 中段：勝率、英雄頭像方塊、KDA／KD；對局中再加一行本場英雄的熟練度。
+    - 標籤列 tags：相遇等小標籤，靠左排。
+    """
+
     def __init__(self, rid: RiotId, win: "MainWindow"):
         super().__init__()
         self.setObjectName("card")
@@ -209,29 +275,49 @@ class PlayerCard(QFrame):
         self.mastery: Mastery | None = None
         self.mastery_loaded = False
         self.set_stripe(None)
-        v = QVBoxLayout(self); v.setContentsMargins(12, 7, 10, 7); v.setSpacing(3)
-        self.title = QLabel(); self.title.setWordWrap(True)
+        v = QVBoxLayout(self); v.setContentsMargins(12, 8, 10, 8); v.setSpacing(4)
+
+        head = QHBoxLayout(); head.setSpacing(10)
+        self.title = QLabel()
         self.title.setToolTip("在 op.gg 開啟個人頁")
         self.title.linkActivated.connect(lambda _: QDesktopServices.openUrl(QUrl(opgg_profile(self.rid))))
-        v.addWidget(self.title)
-        stats = QHBoxLayout(); stats.setSpacing(12)
-        self.big = QLabel(); self.kda = QLabel(); self.dots = ResultBars()
-        stats.addWidget(self.big); stats.addWidget(self.kda); stats.addWidget(self.dots); stats.addStretch()
-        v.addLayout(stats)
-        self.rank = QLabel(); v.addWidget(self.rank)
-        self.chip = QLabel(); self.chip.hide()
-        v.addWidget(self.chip, alignment=Qt.AlignLeft)
+        self.rank = QLabel(); self.rank.setWordWrap(True)  # 窄卡片時牌位換行，不撐寬卡片
+        head.addWidget(self.title, 0, Qt.AlignTop); head.addWidget(self.rank, 1)
+        self.header_right = QHBoxLayout(); self.header_right.setSpacing(4)
+        head.addLayout(self.header_right)
+        v.addLayout(head)
+
+        mid = QHBoxLayout(); mid.setSpacing(14)
+        self.big = QLabel(); self.kda = QLabel()
+        self.tiles = ChampionTiles(win.icon_file, self._tile_tip)
+        for w in (self.big, self.tiles, self.kda):
+            mid.addWidget(w, 0, Qt.AlignVCenter)
+        mid.addStretch()
+        v.addLayout(mid)
         self.champ = QLabel(); self.champ.hide()
         v.addWidget(self.champ)
-        v.addStretch()  # 左右兩隊同一列等高時，多出的空間放在底部
+
+        self.tags = QHBoxLayout(); self.tags.setSpacing(6)
+        self.chip = QLabel(); self.chip.hide()
+        self.tags.addWidget(self.chip); self.tags.addStretch()
+        v.addLayout(self.tags)
+        self.bottom = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Minimum)
+        v.addItem(self.bottom)
         self.set_title("")
         self.set_skeleton()
+
+    def set_compact(self, on: bool):
+        """對局的兩隊畫面：卡片較窄，改用小方塊；同一列兩張卡片等高，多出的空間放在底部。
+        房間畫面的卡片維持內容高度（方塊換列時跟著長高），不被拉長。"""
+        self.tiles.set_tile_size(ChampionTiles.GAME if on else ChampionTiles.ROOM)
+        self.bottom.changeSize(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding if on else QSizePolicy.Minimum)
+        self.layout().invalidate()
 
     def show_hidden(self, alias: str = ""):
         """Riot 隱藏了此人身分：沒有 Riot ID／PUUID 查不到戰績，只顯示化名或本場英雄。"""
         name = f"{alias} " if alias else ""
         self.title.setText(f"<b style='font-size:15px'>{name}</b>{grey('身分被隱藏')}"); self.title.setToolTip("")
-        self.clear_skeleton(); self.dots.hide(); self.rank.hide(); self.kda.hide()
+        self.clear_skeleton(); self.tiles.hide(); self.rank.hide(); self.kda.hide()
         self.big.setText(grey("Riot 沒有提供這位玩家的身分，無法查詢"))
         self.hidden = True
         self.show_champion()
@@ -248,9 +334,9 @@ class PlayerCard(QFrame):
 
     def set_skeleton(self):
         """查詢中：灰色佔位方塊。"""
-        for w, size in ((self.big, (100, 24)), (self.kda, (110, 18))):
+        for w, size in ((self.big, (64, 44)), (self.kda, (64, 40))):
             w.setFixedSize(*size); w.setStyleSheet(f"background:{SKELETON};border-radius:4px;")
-        self.dots.set_items(None)
+        self.tiles.set_games(None)
 
     def clear_skeleton(self):
         for w in (self.big, self.kda):
@@ -261,7 +347,7 @@ class PlayerCard(QFrame):
             self.mastery, self.mastery_loaded = r.mastery, True
         self.result = r
         self.clear_skeleton()
-        self.dots.set_items([])
+        self.tiles.set_games([])
         self.show_champion()
         if r.error:
             if r.error.kind == "key":
@@ -276,11 +362,10 @@ class PlayerCard(QFrame):
         self.set_title(grey(f"Lv {s.level if s.level is not None else '?'}"))
         self.show_ranks(r.ranks)
         if s.games:
-            self.big.setText(f"<span style='font-size:20px;color:{wr_color(s.win_rate)}'>{round(s.win_rate * 100)}%</span>"
-                             f" {grey(f'{s.wins}勝{s.games - s.wins}敗')}")
-            self.kda.setText(f"<span style='font-size:15px'>KDA {s.kda:.1f}</span> {grey(f'KD {s.kd:.1f}')}")
-            self.dots.set_items([(p["win"], self._dot_tip(m, p)) for m in r.matches
-                                 if (p := participant(m, r.puuid))])
+            self.big.setText(f"<b style='font-size:24px;color:{wr_color(s.win_rate)}'>{round(s.win_rate * 100)}%</b>"
+                             f"<br>{grey(f'{s.wins}勝{s.games - s.wins}敗')}")
+            self.kda.setText(kda_html(s.kda, s.kd))
+            self.tiles.set_games(game_summaries(r.puuid, r.matches))
         else:
             self.big.setText(grey("近期沒有對戰")); self.kda.setText("")
         e = r.encounter
@@ -304,11 +389,9 @@ class PlayerCard(QFrame):
                 tips.append(f"{q} {r.wins}勝{r.losses}敗" + (f"（{round(r.wins / games * 100)}%）" if games else ""))
         self.rank.setText(" · ".join(parts)); self.rank.setToolTip("\n".join(tips))
 
-    def _dot_tip(self, match: dict, p: dict) -> str:
-        cid = p["championName"]
-        queue = QUEUES.get(match["info"].get("queueId"), match["info"].get("gameMode", ""))
-        return (f"{self.win.icon_html(cid, 32)}<br><b>{self.win.champions.name(cid)}</b> "
-                f"{p['kills']}/{p['deaths']}/{p['assists']}<br>{grey(queue)}")
+    def _tile_tip(self, g: GameSummary) -> str:
+        return (f"{self.win.icon_html(g.champion, 32)}<br><b>{self.win.champions.name(g.champion)}</b> "
+                f"{g.kills}/{g.deaths}/{g.assists}<br>{grey(g.mode)}")
 
     def set_champion(self, key: int | None, m: Mastery | None = None, *, loaded: bool = False):
         """設定本場英雄；loaded=True 代表熟練度已查完（m 為 None 即沒玩過）。"""
@@ -431,7 +514,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("血壓稽查器")
         self.setWindowIcon(app_icon())
-        self.resize(720, 600)
+        self.resize(880, 600)  # 房間畫面一列放得下 10 個英雄頭像方塊
         self.cfg = Config.load()
         self.champions = Champions()
         self.limiter = RateLimiter()  # 全程共用，跨次稽查也遵守開發 Key 限速
@@ -734,11 +817,18 @@ class MainWindow(QMainWindow):
                 c.show_champion()
 
     def icon_html(self, champion_id: str, size: int) -> str:
-        """英雄頭像的 <img>；本機還沒有就在背景下載，好了再重畫卡片。"""
+        """英雄頭像的 <img>；還沒下載好時是空字串。"""
+        path = self.icon_file(champion_id)
+        if path is None:
+            return ""
+        return f"<img src='{QUrl.fromLocalFile(str(path)).toString()}' width={size} height={size} align=middle>"
+
+    def icon_file(self, champion_id: str) -> Path | None:
+        """英雄頭像的本機檔案；本機還沒有就在背景下載（好了再重畫卡片），先回 None。"""
         cid = self.champions.canonical(champion_id)
         path = icon_path(cid)
         if path.exists():
-            return f"<img src='{QUrl.fromLocalFile(str(path)).toString()}' width={size} height={size} align=middle>"
+            return path
         if self.champions.version and cid not in self.icons_loading:
             self.icons_loading.add(cid)
 
@@ -748,7 +838,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
             threading.Thread(target=load, daemon=True).start()
-        return ""
+        return None
 
     def open_opgg(self):
         members = [m for m in self.room or parse_room_messages(self.box.toPlainText()).members if not m.hidden]
@@ -835,11 +925,11 @@ class MainWindow(QMainWindow):
         """房間：加到單欄最後；遊戲中：side 0 = 我方、1 = 對面，依序往下排。"""
         c = card or PlayerCard(m, self)
         self.cards[key_of(m)] = c
+        c.set_compact(self.view == "game")  # 房間階段的卡片搬進對局畫面時也換成小方塊
         if self.view == "game":
             self.game_rows[side] += 1
             self.game_grid.addWidget(c, self.game_rows[side], side)
         else:
-            c.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)  # 單欄時維持內容高度，不被拉長
             self.cards_box.insertWidget(self.cards_box.count() - 1, c)
         return c
 
