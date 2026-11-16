@@ -1,4 +1,4 @@
-"""純函式：從 Riot API 的回應算出近期戰績、牌位、英雄熟練度、可能多排、相遇，以及拆開進行中對局的兩隊。
+"""純函式：從 Riot API 的回應算出近期戰績（統計與單場摘要）、牌位、英雄熟練度、可能多排、相遇，以及拆開進行中對局的兩隊。
 
 所有 `matches` 參數都是「新 → 舊」排序的 match-v5 對戰 dict 清單。
 """
@@ -7,6 +7,8 @@ from itertools import combinations
 
 PREMADE_MIN_STREAK = 2
 PREMADE_MIN_TOTAL = 3
+QUEUES = {450: "ARAM", 420: "單雙", 440: "彈性", 400: "一般", 430: "一般", 490: "快速", 1700: "競技場",
+          900: "URF", 1900: "URF", 1300: "極限"}
 
 
 def participant(match: dict, puuid: str) -> dict | None:
@@ -51,6 +53,28 @@ def recent_stats(puuid: str, matches: list[dict]) -> RecentStats:
         results=[p["win"] for p in ps],
         level=ps[0].get("summonerLevel") if ps else None,
     )
+
+
+@dataclass
+class GameSummary:
+    """近期戰績中的一場（單場摘要）；介面只渲染這份摘要，不自己讀對戰原始資料。"""
+    win: bool
+    champion: str  # match-v5 的 championName
+    kills: int
+    deaths: int
+    assists: int
+    mode: str      # 佇列的顯示名稱（例如 ARAM、單雙）；不認得的佇列用 gameMode
+
+
+def _mode(match: dict) -> str:
+    info = match["info"]
+    return QUEUES.get(info.get("queueId"), info.get("gameMode", ""))
+
+
+def game_summaries(puuid: str, matches: list[dict]) -> list[GameSummary]:
+    """近期戰績的每一場 → 單場摘要，新 → 舊；玩家不在的對戰略過。"""
+    return [GameSummary(p["win"], p["championName"], p["kills"], p["deaths"], p["assists"], _mode(m))
+            for m in matches if (p := participant(m, puuid))]
 
 
 TIERS = {"IRON": "鐵", "BRONZE": "銅", "SILVER": "銀", "GOLD": "金", "PLATINUM": "白金", "EMERALD": "翡翠",
