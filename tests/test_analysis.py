@@ -1,14 +1,15 @@
-from bp_auditor.analysis import detect_premades, find_encounter, mastery, ranks, recent_stats, split_game
+from bp_auditor.analysis import (detect_premades, find_encounter, game_summaries, mastery, ranks, recent_stats,
+                                 split_game)
 
 
-def match(mid, team100, team200, *, win100=True, champ="Ahri", kda=(2, 1, 3)):
+def match(mid, team100, team200, *, win100=True, champ="Ahri", kda=(2, 1, 3), queue=450, mode="ARAM"):
     """team100/team200: puuid 清單。"""
     ps = []
     for team, members, win in ((100, team100, win100), (200, team200, not win100)):
         for pu in members:
             ps.append(dict(puuid=pu, teamId=team, win=win, championName=champ, summonerLevel=100,
                            kills=kda[0], deaths=kda[1], assists=kda[2]))
-    return {"metadata": {"matchId": mid}, "info": {"participants": ps}}
+    return {"metadata": {"matchId": mid}, "info": {"participants": ps, "queueId": queue, "gameMode": mode}}
 
 
 def test_recent_stats():
@@ -17,6 +18,26 @@ def test_recent_stats():
     assert (s.games, s.wins, s.results, s.level) == (2, 1, [True, False], 100)
     assert s.kda == 5.0
     assert s.kd == 2.0
+
+
+def test_game_summaries_newest_first_with_result_champion_and_kda():
+    ms = [match("1", ["a"], ["x"], win100=True, champ="Ahri", kda=(7, 2, 9)),
+          match("2", ["x"], ["a"], win100=True, champ="Garen", kda=(1, 12, 4))]
+    gs = game_summaries("a", ms)
+    assert [(g.win, g.champion, g.kills, g.deaths, g.assists) for g in gs] == [
+        (True, "Ahri", 7, 2, 9), (False, "Garen", 1, 12, 4)]
+
+
+def test_game_summaries_skip_matches_without_the_player():
+    ms = [match("1", ["x"], ["y"]), match("2", ["a"], ["x"], champ="Lux"), match("3", [], ["x"])]
+    assert [g.champion for g in game_summaries("a", ms)] == ["Lux"]
+    assert game_summaries("a", []) == []
+
+
+def test_game_summaries_mode_from_queue_falling_back_to_game_mode():
+    ms = [match("1", ["a"], [], queue=450), match("2", ["a"], [], queue=420),
+          match("3", ["a"], [], queue=9999, mode="NEXUSBLITZ")]
+    assert [g.mode for g in game_summaries("a", ms)] == ["ARAM", "單雙", "NEXUSBLITZ"]
 
 
 def test_premade_streak_from_most_recent():
