@@ -4,6 +4,7 @@ import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .analysis import FEEDING_DEATHS_PER_MINUTE
 from .keys import KeyPool
 
 
@@ -19,10 +20,8 @@ class Config:
     my_puuid: str = ""  # 本人以 PUUID 認定，改名後 PUUID 不變
     recent_games: int = 5
     autostart: bool = False
-    # 送頭場門檻：(KDA < kda_below 或 KD ≤ kd_at_most) 且 死亡 ≥ min_deaths
-    feeding_kda_below: float = 2.0
-    feeding_kd_at_most: float = 0.5
-    feeding_min_deaths: int = 10
+    # 送頭場門檻：死亡速率（單場死亡數 ÷ 整局分鐘）≥ 此值；舊版的 KDA／KD／死亡次數三個欄位載入時直接捨棄
+    feeding_deaths_per_minute: float = FEEDING_DEATHS_PER_MINUTE
     # 黑名單只存 PUUID（改名後仍認得）；PUUID 依 Key 類型加密，換 Key 類型會失效（使用者接受）
     blacklist: list[str] = field(default_factory=list)
 
@@ -43,13 +42,14 @@ class Config:
         try:
             data = _migrate_keys(json.loads(config_path().read_text(encoding="utf-8")))
             return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, AttributeError):
             return cls()
 
     def save(self):
         p = config_path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({**asdict(self), "api_keys": self.api_keys.to_json()}, ensure_ascii=False, indent=2), encoding="utf-8")
+        data = {**asdict(self), "api_keys": self.api_keys.to_json()}
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _migrate_keys(data: dict) -> dict:

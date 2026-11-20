@@ -77,6 +77,7 @@ class GameSummary:
     keystone: int | None = None                     # 主符文 id；該模式沒有符文時為 None
     spells: list[int] = field(default_factory=list)  # 兩個召喚師技能的數字 key
     feeding: bool = False  # 送頭場：方塊加青色霓虹框
+    minutes: float = 0.0   # 整局時長（分鐘），不是該玩家自己的在線時間
 
     @property
     def kda(self) -> float:
@@ -87,20 +88,32 @@ class GameSummary:
     def kd(self) -> float:
         return self.kills / max(self.deaths, 1)
 
-
-@dataclass(frozen=True)
-class FeedingThresholds:
-    """送頭場的門檻：(KDA < kda_below 或 KD ≤ kd_at_most) 且 死亡 ≥ min_deaths。"""
-    kda_below: float = 2.0
-    kd_at_most: float = 0.5
-    min_deaths: int = 10
+    @property
+    def death_rate(self) -> float:
+        """死亡速率：每分鐘死亡次數。"""
+        return death_rate(self.deaths, self.minutes)
 
 
-def is_feeding(p: dict, t: FeedingThresholds = FeedingThresholds()) -> bool:
-    """送頭場：只看該玩家自己這一場的數字；重開局永遠不是送頭場。"""
+FEEDING_DEATHS_PER_MINUTE = 0.5  # 送頭場門檻的預設值：死亡速率 ≥ 每分鐘 0.5 次
+
+
+def game_minutes(match: dict) -> float:
+    """整局時長（分鐘）。match-v5 的 gameDuration 自 11.20 版起是秒；更早的對戰沒有 gameEndTimestamp，單位是毫秒。"""
+    info = match["info"]
+    duration = info.get("gameDuration") or 0
+    return duration / (60 if "gameEndTimestamp" in info else 60_000)
+
+
+def death_rate(deaths: int, minutes: float) -> float:
+    """死亡速率：單場死亡數 ÷ 整局時長（分鐘）；沒有時長時為 0。"""
+    return deaths / minutes if minutes > 0 else 0.0
+
+
+def is_feeding(p: dict, minutes: float, threshold: float = FEEDING_DEATHS_PER_MINUTE) -> bool:
+    """送頭場：該玩家這一場的死亡速率 ≥ 門檻（所有模式共用）；重開局永遠不是送頭場。"""
     if is_remake(p):
         return False
-    return (_kda([p]) < t.kda_below or _kd([p]) <= t.kd_at_most) and p["deaths"] >= t.min_deaths
+    return death_rate(p["deaths"], minutes) >= threshold
 
 
 def _mode(match: dict) -> str:
@@ -123,11 +136,11 @@ def _spells(p: dict) -> list[int]:
 
 
 def game_summaries(puuid: str, matches: list[dict],
-                   feeding: FeedingThresholds = FeedingThresholds()) -> list[GameSummary]:
-    """近期戰績的每一場 → 單場摘要，新 → 舊；玩家不在的對戰略過。feeding：送頭場的門檻。"""
+                   feeding: float = FEEDING_DEATHS_PER_MINUTE) -> list[GameSummary]:
+    """近期戰績的每一場 → 單場摘要，新 → 舊；玩家不在的對戰略過。feeding：送頭場的死亡速率門檻（次/分）。"""
     return [GameSummary(p["win"], p["championName"], p["kills"], p["deaths"], p["assists"], _mode(m),
                         remake=is_remake(p), items=_items(p), keystone=_keystone(p), spells=_spells(p),
-                        feeding=is_feeding(p, feeding))
+                        feeding=is_feeding(p, game_minutes(m), feeding), minutes=game_minutes(m))
             for m in matches if (p := participant(m, puuid))]
 
 
