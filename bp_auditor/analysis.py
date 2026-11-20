@@ -5,6 +5,8 @@
 from dataclasses import dataclass, field
 from itertools import combinations
 
+from .parsing import RiotId
+
 PREMADE_MIN_STREAK = 2
 PREMADE_MIN_TOTAL = 3
 STREAK_MIN = 3  # 連勝／連敗達這個場數才標示
@@ -215,6 +217,16 @@ def split_game(game: dict, me_puuid: str) -> tuple[list[GamePlayer], list[GamePl
         gp = GamePlayer(p.get("riotId", ""), p.get("puuid") or "", p.get("championId", 0))
         (allies if p["teamId"] == my_team else enemies).append(gp)
     return allies, enemies
+
+
+def game_puuids(game: dict | None, room: list) -> dict[str, str]:
+    """進行中對局裡，room（RiotId 清單）每個人的 PUUID，以 str(RiotId) 為標籤；Riot ID 不分大小寫比對。
+    換 Key 重跑查對面時用：觀戰資料的 PUUID 是查詢所用那組 Key 的版本。對不到的人不列（改用 Riot ID 查帳號）。"""
+    found = {}
+    for p in (game or {}).get("participants", []):
+        if p.get("puuid") and (rid := RiotId.parse(p.get("riotId") or "")):  # 與房間標籤同一種寫法
+            found[str(rid).casefold()] = p["puuid"]
+    return {str(m): found[str(m).casefold()] for m in room if str(m).casefold() in found}
 
 
 @dataclass
