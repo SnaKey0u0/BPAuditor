@@ -23,8 +23,9 @@ from .analysis import (GameSummary, Mastery, PremadeGroup, detect_premades, game
 from .audit import ME, Audit, AuditOutcome, Me, PlayerResult
 from .champions import Champions, Icon, download_asset, download_icon, icon_dir, icon_path
 from .config import Config
+from .keys import BAD, CHECKING, OK, WARMING, mask
 from .parsing import RiotId, members_to_query, parse_room_messages, room_change, room_members_in_clipboard
-from .riot import DEV_KEY_LIFETIME, KEY_PAGE, RateLimiter, RiotClient, RiotError, find_api_key
+from .riot import KEY_PAGE, RateLimiter, RiotClient, RiotError, find_api_key
 
 GROUP_COLORS = ["#ffb300", "#ab47bc", "#29b6f6", "#ef6c00"]
 RED, GREEN, GREY, BLUE, ORANGE = "#ef5350", "#66bb6a", "#9e9e9e", "#90caf9", "#ffb300"
@@ -534,6 +535,59 @@ class PlayerCard(QFrame):
         self.champ.setText(f"{head}　{body}"); self.champ.show()
 
 
+def key_status_html(status: str) -> str:
+    """設定頁 Key 清單每一列的狀態。"""
+    return {CHECKING: grey("驗證中…"),
+            WARMING: f"<span style='color:{BLUE}'>新 Key 生效中…</span>",
+            OK: f"<span style='color:{GREEN}'>✓ 可用</span>",
+            BAD: f"<span style='color:{RED}'>失效，請重新產生</span>"}[status]
+
+
+class KeyList(QWidget):
+    """設定頁的 Key 清單（版型 A）：一列一組 Key（#序號、遮罩過的 Key、狀態、✕），下方輸入框新增。
+    清單本身在 cfg.api_keys（keys.KeyPool）；新增、刪除、驗證都交給 MainWindow。"""
+
+    def __init__(self, win: "MainWindow"):
+        super().__init__()
+        self.win = win
+        v = QVBoxLayout(self); v.setContentsMargins(0, 0, 0, 0)
+        self.grid = QGridLayout(); self.grid.setHorizontalSpacing(12); self.grid.setColumnStretch(2, 1)
+        v.addLayout(self.grid)
+        add = QHBoxLayout()
+        self.input = QLineEdit(); self.input.setPlaceholderText("貼上 RGAPI-… 後按 Enter")
+        self.input.returnPressed.connect(self.add)
+        btn = QPushButton("新增"); btn.setObjectName("secondary"); btn.clicked.connect(self.add)
+        add.addWidget(self.input, 1); add.addWidget(btn)
+        v.addLayout(add)
+        self.error = QLabel(); self.error.hide()
+        v.addWidget(self.error)
+
+    def add(self):
+        text = self.input.text().strip()
+        if not text:
+            return
+        if self.win.accept_key(find_api_key(text) or text):
+            self.input.clear(); self.show_error("")
+        else:
+            self.show_error("已經在清單裡")
+
+    def show_error(self, text: str):
+        self.error.setText(f"<span style='color:{RED}'>{text}</span>"); self.error.setVisible(bool(text))
+
+    def refresh(self):
+        while self.grid.count():
+            w = self.grid.takeAt(0).widget()
+            if w:
+                w.setParent(None); w.deleteLater()
+        active = self.win.cfg.api_keys.first_usable()
+        for i, k in enumerate(self.win.cfg.api_keys):
+            num = QLabel(f"<b>#{i + 1}</b>" if k is active else grey(f"#{i + 1}"))
+            rm = QPushButton("✕"); rm.setObjectName("icon"); rm.setToolTip("刪除這組 Key")
+            rm.clicked.connect(lambda _=False, key=k.key: self.win.remove_key(key))
+            for col, w in enumerate((num, QLabel(mask(k.key)), QLabel(key_status_html(k.status)), rm)):
+                self.grid.addWidget(w, i, col)
+
+
 class SettingsPage(QWidget):
     def __init__(self, win: "MainWindow"):
         super().__init__()
@@ -547,21 +601,13 @@ class SettingsPage(QWidget):
         panel = QFrame(); panel.setObjectName("panel"); f = self.form = QFormLayout(panel)
         v.addWidget(panel); v.addStretch()
 
-        self.key = QLineEdit(cfg.api_key); self.key.setEchoMode(QLineEdit.Password)
-        self.key.setPlaceholderText("RGAPI-…")
-        self.key.editingFinished.connect(self.save_key)
-        show = QPushButton("👁"); show.setObjectName("icon"); show.setCheckable(True); show.setToolTip("顯示 Key")
-        show.toggled.connect(lambda on: self.key.setEchoMode(QLineEdit.Normal if on else QLineEdit.Password))
-        row = QHBoxLayout(); row.addWidget(self.key, 1); row.addWidget(show)
-        f.addRow("API Key", row)
+        self.keys = KeyList(win)
+        f.addRow("API Key", self.keys)
         self.key_state = QLabel(); self.key_state.setWordWrap(True)
-        upd = QPushButton("更新 API Key"); upd.setObjectName("secondary"); upd.clicked.connect(win.start_key_refresh)
+        upd = QPushButton("取得新 Key"); upd.setObjectName("secondary"); upd.clicked.connect(win.start_key_refresh)
         row = QHBoxLayout(); row.addWidget(self.key_state, 1); row.addWidget(upd)
         f.addRow("", row)
-        f.addRow("", QLabel(grey("在網站複製 Key，程式會自動存入")))
-        self.personal = Switch("Personal Key（不會過期）"); self.personal.setChecked(cfg.personal_key)
-        self.personal.toggled.connect(self.save_personal)
-        f.addRow("", self.personal)
+        f.addRow("", QLabel(grey("在網站複製 Key，程式會自動加入清單")))
 
         self.me = QLineEdit(cfg.my_riot_id); self.me.setPlaceholderText("名稱#標籤")
         self.me.editingFinished.connect(self.save_me)
@@ -591,11 +637,6 @@ class SettingsPage(QWidget):
         f.addRow("每分鐘死亡 ≥", self.feed_rate)
         f.addRow("", QLabel(grey("死亡數 ÷ 整局時長（分鐘）≥ 門檻 → 送頭場")))
 
-    def save_key(self):
-        key = self.key.text().strip()
-        if key != self.win.cfg.api_key:
-            self.win.accept_key(key)
-
     def save_me(self):
         text = self.me.text().strip()
         cfg = self.win.cfg
@@ -607,7 +648,7 @@ class SettingsPage(QWidget):
         cfg.my_riot_id, cfg.my_puuid = text, ""
         cfg.save()
         self._me_state("")
-        if rid and cfg.api_key:
+        if rid and self.win.active_key():
             self._me_state(grey("確認中…"))
             self.win.lookup_me(rid)
 
@@ -625,11 +666,7 @@ class SettingsPage(QWidget):
     def update_games_hint(self):
         n = self.games.value()
         self.games_hint.setText(grey(f"5 人房最多約 {4 * n + 15} 次請求，進遊戲查對面再約 {5 * n + 22} 次。"
-                                     "開發 Key 上限每 2 分鐘 100 次。"))
-
-    def save_personal(self, on: bool):
-        self.win.cfg.personal_key = on; self.win.cfg.save()
-        self.win.update_key_status()
+                                     "每組 Key 上限每 2 分鐘 100 次。"))
 
     def save_autostart(self, on: bool):
         self.win.cfg.autostart = on; self.win.cfg.save()
@@ -650,19 +687,18 @@ class MainWindow(QMainWindow):
         self.resize(880, 600)  # 房間畫面一列放得下 10 個英雄頭像方塊
         self.cfg = Config.load()
         self.champions = Champions()
-        self.limiter = RateLimiter()  # 全程共用，跨次稽查也遵守開發 Key 限速
+        self.limiter = RateLimiter()  # 全程共用，跨次稽查也遵守 Key 限速
         self.cards: dict[str, PlayerCard] = {}
         self.room: list[RiotId] = []
         self.histories: dict = {}
         self.running = False
         self.pending: tuple[list[RiotId], bool, bool] | None = None  # (成員, 自動, 強制重查)
-        self.key_warming = False  # 新 Key 還沒被 Riot 啟用
         self.icons_loading: set[str] = set()
         self.assets_ready: set[str] = set()  # 已在本機的提示框圖示，免得每次重畫都查檔案
         self.asset_slots = threading.Semaphore(4)  # 提示框圖示一次可能上百個，限制同時下載數
-        self.key_bad = False
-        self.key_note = ""
         self.waiting_key = False
+        self.audit_key = ""  # 上一次稽查用的 Key；Key 有問題時知道是哪一組
+        self.puuid_key = self.active_key()  # cfg.my_puuid 是用哪一組 Key 查的（PUUID 依 Key 加密）
         self.me_note = ""
         self.quitting = False
         self.view = "room"  # "room"：房間成員單欄；"game"：遊戲中左右兩隊
@@ -691,8 +727,6 @@ class MainWindow(QMainWindow):
         self._build_tray()
         threading.Thread(target=self._load_champions, daemon=True).start()
         QGuiApplication.clipboard().dataChanged.connect(self.on_clipboard)
-        self.key_timer = QTimer(self); self.key_timer.timeout.connect(self.update_key_status)
-        self.key_timer.start(60_000)
         self.progress_timer = QTimer(self); self.progress_timer.timeout.connect(self.update_progress)
         self.poll_timer = QTimer(self); self.poll_timer.timeout.connect(self.poll_game)
         self.poll_tick = QTimer(self); self.poll_tick.timeout.connect(self.update_poll_bar)
@@ -700,7 +734,7 @@ class MainWindow(QMainWindow):
         self.update_key_status()
         if self.cfg.autostart:
             autostart.apply(True)  # exe 搬過位置時更新路徑
-        if not self.cfg.api_key:
+        if not self.cfg.api_keys:
             self.show_settings()
 
     # ─── 版面 ───
@@ -803,49 +837,66 @@ class MainWindow(QMainWindow):
         self.right.setCurrentIndex(0); self.gear.setChecked(False)
 
     # ─── API Key ───
+    def active_key(self) -> str:
+        """這次請求要用的 Key：清單中第一組可用的（還不輪替）；沒有時是空字串。"""
+        k = self.cfg.api_keys.first_usable()
+        return k.key if k else ""
+
     def client(self) -> RiotClient:
-        return RiotClient(self.cfg.api_key, self.limiter)
+        return RiotClient(self.active_key(), self.limiter)
+
+    def key_warming(self) -> bool:
+        """沒有可用的 Key，但有新 Key 在等 Riot 啟用：這段期間的稽查先排隊。"""
+        return not self.active_key() and any(k.status == WARMING for k in self.cfg.api_keys)
 
     def update_key_status(self):
+        pool = self.cfg.api_keys
         if self.waiting_key:
             text = f"<span style='color:{BLUE}'>等你複製新 Key</span>"
-        elif self.key_warming:
-            text = f"<span style='color:{BLUE}'>新 Key 生效中…</span>"
-        elif not self.cfg.api_key:
-            text = f"<span style='color:{RED}'>未設定 Key</span>"
-        elif self.key_note:
-            text = self.key_note
-        elif self.key_bad:
-            text = f"<span style='color:{RED}'>Key 無法使用</span>"
         else:
-            left = DEV_KEY_LIFETIME - (time.time() - self.cfg.key_saved_at)
-            if self.cfg.personal_key or not self.cfg.key_saved_at:
-                text = grey("Key 已設定")
-            elif left <= 0:
-                text = f"<span style='color:{RED}'>Key 可能過期了</span>"
-            else:
-                color = ORANGE if left < 2 * 3600 else GREY
-                span = f"{left / 3600:.0f} 小時" if left >= 3600 else f"{left / 60:.0f} 分鐘"
-                text = f"<span style='color:{color}'>Key 剩 {span}</span>"
+            summary = pool.summary()
+            color = {"ok": GREY, "busy": BLUE, "error": RED}[summary.tone]
+            text = f"<span style='color:{color}'>{summary.text}</span>"
         self.key_status.setText(text)
         self.settings.key_state.setText(text)
+        self.settings.keys.refresh()
+        if pool.all_bad:
+            self.show_key_banner("所有 API Key 都失效了，請重新產生", "取得新 Key")
+
+    def on_keys_changed(self):
+        """清單或狀態變了：存檔、重畫；使用中的 Key 換了，本人的 PUUID 要用新 Key 重查（PUUID 依 Key 加密）。"""
+        active = self.active_key()
+        changed = active != self.puuid_key
+        if changed:
+            self.puuid_key, self.cfg.my_puuid = active, ""
+        self.cfg.save()
+        if changed:
+            entry = self.cfg.api_keys.get(active) if active else None
+            rid = RiotId.parse(self.cfg.my_riot_id) if self.cfg.my_riot_id else None
+            if entry and entry.status == OK and rid:  # 還在驗證中的 Key 等驗證通過再查（on_key_checked）
+                self.lookup_me(rid)
+        self.update_key_status()
 
     def start_key_refresh(self):
         self.waiting_key = True
         self.update_key_status()
         QDesktopServices.openUrl(QUrl(KEY_PAGE))
 
-    def accept_key(self, key: str):
+    def accept_key(self, key: str) -> bool:
+        """加入 Key 清單（加在最後）並驗證；已經在清單裡就不加，回 False。"""
         self.waiting_key = False
-        self.cfg.set_key(key, time.time()); self.cfg.save()
-        self.settings.key.setText(self.cfg.api_key)
-        if not self.cfg.api_key:
-            self.key_note = ""; self.update_key_status(); return
-        self.key_bad, self.key_warming = False, False
+        entry = self.cfg.api_keys.add(key, time.time())
+        if entry is None:
+            self.update_key_status(); return False
         self.key_banner.hide()
-        self.key_note = grey("驗證 Key 中…")
-        self.update_key_status()
-        self.check_key(key)
+        self.on_keys_changed()
+        self.check_key(entry.key)
+        return True
+
+    def remove_key(self, key: str):
+        if self.cfg.api_keys.remove(key):
+            self.key_banner.hide()
+            self.on_keys_changed()
 
     def check_key(self, key: str):
         def check():
@@ -855,40 +906,39 @@ class MainWindow(QMainWindow):
                 self.bridge.key_checked.emit(key, e.kind, str(e))
         threading.Thread(target=check, daemon=True).start()
 
-    def key_is_fresh(self) -> bool:
-        return time.time() - self.cfg.key_saved_at < KEY_WARMUP
+    def key_is_fresh(self, key: str) -> bool:
+        entry = self.cfg.api_keys.get(key)
+        return bool(entry) and time.time() - entry.added_at < KEY_WARMUP
 
-    def warm_up_key(self):
-        """剛產生的 Key 要等 Riot 啟用（約 1–2 分鐘）：每 15 秒重驗一次，期間的稽查先排隊。"""
-        self.key_warming, self.key_note = True, ""
+    def warm_up_key(self, key: str):
+        """剛產生的 Key 要等 Riot 啟用（約 1–2 分鐘）：每 15 秒重驗一次；沒有其他可用的 Key 時稽查先排隊。"""
+        self.cfg.api_keys.set_status(key, WARMING)
         self.key_banner.hide()
-        self.update_key_status()
-        key = self.cfg.api_key
-        QTimer.singleShot(KEY_RECHECK_MS, lambda: self.check_key(key) if key == self.cfg.api_key else None)
+        self.on_keys_changed()
+        QTimer.singleShot(KEY_RECHECK_MS, lambda: self.check_key(key) if self.cfg.api_keys.get(key) else None)
 
     def on_key_checked(self, key: str, kind: str, error: str):
-        if key != self.cfg.api_key:
-            return
-        if kind == "key" and self.key_is_fresh():
-            self.warm_up_key(); return
-        self.key_warming = False
-        self.key_bad = bool(error)
-        if error:
-            self.key_note = ""
-            self.show_key_banner(error, "更新 API Key")
+        if not self.cfg.api_keys.get(key):
+            return  # 驗證期間被刪掉了
+        if kind == "key" and self.key_is_fresh(key):
+            self.warm_up_key(key); return
+        if kind == "key":
+            self.cfg.api_keys.set_status(key, BAD)  # 不自動刪除，由使用者決定
         else:
-            self.key_note = f"<span style='color:{GREEN}'>✓ Key 可用</span>"
-            self.key_banner.hide()
-            if self.pending and not self.running:
+            # 驗證通過；或是連線／伺服器問題，分不出 Key 好壞，先當作可用
+            self.cfg.api_keys.set_status(key, OK)
+            if error:
+                self.status.setText(f"驗證 Key 時發生錯誤：{error}")
+        self.on_keys_changed()
+        if not error:
+            if self.pending and not self.running and not self.key_warming():
                 members, auto, force = self.pending
                 self.pending = None
                 self.start_room(members, auto, force)
-            QTimer.singleShot(8000, lambda: (setattr(self, "key_note", ""), self.update_key_status()))
             if self.cfg.my_riot_id and not self.cfg.my_puuid:
                 rid = RiotId.parse(self.cfg.my_riot_id)
                 if rid:
                     self.lookup_me(rid)
-        self.update_key_status()
         QApplication.alert(self)
 
     def show_key_banner(self, text: str, button: str):
@@ -896,7 +946,7 @@ class MainWindow(QMainWindow):
         self.key_banner.show()
 
     def _key_banner_action(self):
-        if self.cfg.api_key:
+        if self.cfg.api_keys:
             self.start_key_refresh()
         else:
             self.show_settings()
@@ -1023,9 +1073,9 @@ class MainWindow(QMainWindow):
     def on_clipboard(self):
         text = QGuiApplication.clipboard().text()
         key = find_api_key(text)
-        if key:
-            if key != self.cfg.api_key:
-                self.accept_key(key)
+        if key:  # 新 Key 加入清單，不取代原本的
+            if not self.accept_key(key):
+                self.settings.keys.show_error("剛複製的 Key 已經在清單裡")
             return
         members = room_members_in_clipboard(text)
         if members:
@@ -1039,20 +1089,24 @@ class MainWindow(QMainWindow):
         self.start_room(pr.members, auto=False, force=True)
 
     def start_room(self, members: list[RiotId], auto: bool, force: bool = False):
-        if self.running or self.key_warming:
+        if self.running or self.key_warming():
             self.pending = (members, auto, force)
-            if self.key_warming:
+            if self.key_warming():
                 self.status.setText("新 Key 生效後自動稽查")
             return
-        change = "new" if force or self.view == "game" else room_change(self.room, members)
+        # 使用中的 Key 換了：舊結果的 PUUID 出自別組 Key，不能沿用，整房重查（ADR 0002）
+        key_changed = bool(self.audit_key) and self.active_key() != self.audit_key
+        change = "new" if force or key_changed or self.view == "game" else room_change(self.room, members)
         if change == "same":
             self.status.setText("名單沒變，不重查"); return
         if auto:
             self.box.setPlainText("\n".join(f"{m.name} #{m.tag} 進入組隊房間" for m in members))
             self.err.setText("")
             self.notify()
-        if not self.cfg.api_key:
+        if not self.cfg.api_keys:
             self.show_key_banner("尚未設定 API Key", "設定"); return
+        if not self.active_key():
+            self.show_key_banner("所有 API Key 都失效了，請重新產生", "取得新 Key"); return
         self.show_results()
         if change == "shrink":
             self._shrink(members); return
@@ -1136,7 +1190,8 @@ class MainWindow(QMainWindow):
         self.update_progress()
         self.progress_timer.start(500)
         b = self.bridge
-        audit = Audit(self.client(), self.room, self.me(), self.cfg.recent_games, query=query, prior=self.histories,
+        self.audit_key = self.active_key()
+        audit = Audit(RiotClient(self.audit_key, self.limiter), self.room, self.me(), self.cfg.recent_games, query=query, prior=self.histories,
                       on_player=b.player.emit, on_me=b.me.emit, on_outcome=b.outcome.emit, on_done=b.done.emit,
                       on_mastery=b.mastery.emit, **game)
         threading.Thread(target=audit.run, daemon=True).start()
@@ -1149,14 +1204,14 @@ class MainWindow(QMainWindow):
                 self._mark_me(card, k)
         self.done_count += 1
         self.update_progress()
-        if r.error and r.error.kind == "key" and self.key_is_fresh():
-            if not self.key_warming and self.view == "room":
+        entry = self.cfg.api_keys.get(self.audit_key) if r.error and r.error.kind == "key" else None
+        if entry and self.key_is_fresh(entry.key):
+            if entry.status != WARMING and self.view == "room":
                 self.pending = (self.room, False, True)  # Key 生效後整房重查
-                self.warm_up_key()
-        elif r.error and r.error.kind == "key" and not self.key_bad:
-            self.key_bad = True
-            self.show_key_banner(str(r.error), "更新 API Key")
-            self.update_key_status()
+                self.warm_up_key(entry.key)
+        elif entry and entry.status != BAD:
+            entry.status = BAD  # 全部失效時 update_key_status 會顯示錯誤橫幅；否則下次稽查改用下一組
+            self.on_keys_changed()
 
     def _clear_banner(self):
         while self.banner.count():
@@ -1199,7 +1254,7 @@ class MainWindow(QMainWindow):
         self.audit_btn.setEnabled(True)
         msg = f"完成，用時 {time.monotonic() - self.t0:.1f} 秒"
         self.status.setText(msg + (f"\n{self.me_note}" if self.me_note else ""))
-        if self.pending and not self.key_warming:
+        if self.pending and not self.key_warming():
             members, auto, force = self.pending
             self.pending = None
             self.start_room(members, auto, force)
@@ -1239,7 +1294,7 @@ class MainWindow(QMainWindow):
 
     def check_game(self, manual: bool):
         puuid = self.cfg.my_puuid
-        if not puuid or not self.cfg.api_key:
+        if not puuid or not self.active_key():
             if manual:
                 self.status.setText("先在設定填好 API Key 和你的 Riot ID")
             return

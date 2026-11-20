@@ -12,7 +12,6 @@ ACCOUNT_HOST = "https://asia.api.riotgames.com"
 PLATFORM_HOST = "https://tw2.api.riotgames.com"
 MATCH_HOST = "https://sea.api.riotgames.com"
 KEY_PAGE = "https://developer.riotgames.com"
-DEV_KEY_LIFETIME = 24 * 3600
 _KEY_RE = re.compile(r"RGAPI-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 

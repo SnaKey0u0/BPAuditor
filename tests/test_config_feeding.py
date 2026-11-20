@@ -33,6 +33,6 @@ def test_old_config_with_only_the_three_old_thresholds_loads_default():
     p.write_text(json.dumps({"api_key": "k", "feeding_kda_below": 1.5, "feeding_kd_at_most": 0.3,
                              "feeding_min_deaths": 12}), encoding="utf-8")
     cfg = Config.load()
-    assert (cfg.api_key, cfg.feeding_deaths_per_minute) == ("k", 0.5)
+    assert ([k.key for k in cfg.api_keys], cfg.feeding_deaths_per_minute) == (["k"], 0.5)
     cfg.save()
     assert "feeding_min_deaths" not in json.loads(p.read_text(encoding="utf-8"))  # 舊欄位直接捨棄
