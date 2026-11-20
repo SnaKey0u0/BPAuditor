@@ -8,7 +8,7 @@ import threading
 import time
 from typing import Callable, TypeVar
 
-from .keys import BAD, CHECKING, WARMING, ApiKey, KeyPool
+from .keys import BAD, CHECKING, UNVERIFIED, WARMING, ApiKey, KeyPool
 from .riot import KeySwitch, RateLimiter, RiotClient, RiotError
 
 # 冷卻要等超過這麼久才換 Key。每秒 20 次的限速幾乎每次稽查都會碰到、只要等不到 1 秒，
@@ -19,7 +19,9 @@ T = TypeVar("T")
 
 
 class KeyRotation:
-    """Key 清單的輪替狀態：使用中的 Key，與每組 Key 各自的限速器。執行緒安全。"""
+    """Key 清單的輪替狀態：使用中的 Key，與每組 Key 各自的限速器。執行緒安全。
+
+    pool 可以是會變的清單（介面執行緒會新增／刪除 Key）：這裡每次都先取 snapshot 再走訪，背景執行緒不直接走訪原清單。"""
 
     def __init__(self, pool: KeyPool | Callable[[], KeyPool], *, clock=time.monotonic, sleep=time.sleep,
                  fetch=None, limits=None, switch_after: float = SWITCH_AFTER):
@@ -50,10 +52,19 @@ class KeyRotation:
         return RiotClient(key, self.limiter(key), switch=switch, fetch=self._fetch)
 
     # ─── 挑 Key ───
+    def _entries(self) -> list[ApiKey]:
+        """Key 清單的複本（見 KeyPool.snapshot）。"""
+        return self._pool().snapshot()
+
+    def usable_count(self) -> int:
+        """現在有幾組可用的 Key。"""
+        return sum(k.usable for k in self._entries())
+
     def _cycle(self, after: str, include: bool) -> list[str]:
         """可用的 Key，從 after 開始依序循環（include：after 自己排第一個）。after 不在清單裡時從頭開始。"""
-        keys = [k.key for k in self._pool()]
-        usable = {k.key for k in self._pool() if k.usable}
+        entries = self._entries()
+        keys = [k.key for k in entries]
+        usable = {k.key for k in entries if k.usable}
         if after in keys:
             i = keys.index(after)
             keys = keys[i:] + keys[:i] if include else keys[i + 1:] + keys[:i]
@@ -87,13 +98,13 @@ class KeyRotation:
 
     def mark_bad(self, key: str):
         """預設的失效處理：標成失效，之後挑 Key 時跳過。"""
-        for k in self._pool():
+        for k in self._entries():
             if k.key == key:
                 k.status = BAD
 
 
 def key_row_status(entry: ApiKey, active: bool, cooldown: float, switch_after: float = SWITCH_AFTER) -> tuple[str, str]:
-    """設定頁 Key 清單每一列的狀態：(文字, 色調)。色調：active、ok、cooling、busy、grey、error。
+    """設定頁 Key 清單每一列的狀態：(文字, 色調)。色調：active、ok、cooling、warn、busy、grey、error。
     cooldown 是這組 Key 還要冷卻幾秒；短於 switch_after 的（每秒限速的短暫等待）不算冷卻。"""
     if entry.status == BAD:
         return "失效，請重新產生", "error"
@@ -104,7 +115,11 @@ def key_row_status(entry: ApiKey, active: bool, cooldown: float, switch_after: f
         return ("✓ 使用中・" + cooling, "cooling") if cooling else ("✓ 使用中", "active")
     if cooling:
         return cooling, "cooling"
-    return ("驗證中…", "grey") if entry.status == CHECKING else ("✓ 可用", "ok")
+    if entry.status == CHECKING:
+        return "驗證中…", "grey"
+    if entry.status == UNVERIFIED:
+        return "⚠ 未能驗證", "warn"
+    return "✓ 可用", "ok"
 
 
 def run_rotating(rotation: KeyRotation, job: Callable[[str, RiotClient], T], *,
@@ -119,7 +134,7 @@ def run_rotating(rotation: KeyRotation, job: Callable[[str, RiotClient], T], *,
     才不會在幾組 Key 之間永遠重跑下去。沒有可用的 Key 時拋 RiotError('key')。
     """
     on_key_error = on_key_error or rotation.mark_bad
-    budget = len([k for k in rotation._pool() if k.usable])
+    budget = rotation.usable_count()
     switches = 0
 
     def switch(key: str, wait: float) -> str | None:

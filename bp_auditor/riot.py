@@ -52,6 +52,18 @@ def urllib_fetch(url: str, key: str, timeout: float) -> tuple[int, dict, bytes]:
         return e.code, dict(e.headers or {}), e.read()
 
 
+DEFAULT_RETRY_AFTER = 2.0  # 429 沒給 Retry-After，或給的不是秒數（例如 HTTP 日期）時先等這麼久
+
+
+def retry_after_seconds(value: str) -> float:
+    """429 的 Retry-After 標頭 → 要等幾秒。Riot 給的是秒數；空的、HTTP 日期等讀不懂的值用預設值，不讓稽查當掉。"""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_RETRY_AFTER
+    return seconds if math.isfinite(seconds) and seconds >= 0 else DEFAULT_RETRY_AFTER
+
+
 class RateLimiter:
     """滑動視窗限速：預設為 Key 的 20 次/秒、100 次/120 秒。每組 Key 各一個（見 rotation.KeyRotation）。
 
@@ -70,7 +82,7 @@ class RateLimiter:
         return max(0.0, self._blocked_until - self.clock())
 
     def block_for(self, seconds: float):
-        """Riot 回 429：Retry-After 秒內不發請求。"""
+        """seconds 秒內不發請求，並給畫面顯示倒數：Riot 回 429（Retry-After），或本地限速有請求要等。"""
         with self._lock:
             self._blocked_until = max(self._blocked_until, self.clock() + seconds)
 
@@ -99,14 +111,9 @@ class RateLimiter:
                 self._stamps.append(now)
             return wait
 
-    def note_waiting(self, seconds: float):
-        """有請求要等 seconds 秒：記下來給畫面顯示倒數。"""
-        with self._lock:
-            self._blocked_until = max(self._blocked_until, self.clock() + seconds)
-
     def acquire(self):
         while (wait := self.try_acquire()) > 0:
-            self.note_waiting(wait)
+            self.block_for(wait)
             self.sleep(min(wait, 1.0) + 0.01)
 
 
@@ -138,7 +145,7 @@ class RiotClient:
             if wait <= 0:
                 return
             self._give_up("cooling", wait)
-            self._limiter.note_waiting(wait)
+            self._limiter.block_for(wait)
             self._limiter.sleep(min(wait, 1.0) + 0.01)
 
     def _get(self, url: str):
@@ -163,8 +170,8 @@ class RiotClient:
             if code == 400:
                 raise RiotError("bad_request", f"Riot 拒絕這個請求（HTTP 400）")
             if code == 429:  # 伺服器端限流（例如同一把 Key 在別處也在用）：冷卻到 Retry-After
-                retry = next((v for k, v in headers.items() if k.lower() == "retry-after"), "2")
-                self._limiter.block_for(float(retry))
+                retry = next((v for k, v in headers.items() if k.lower() == "retry-after"), "")
+                self._limiter.block_for(retry_after_seconds(retry))
                 continue
             if 500 <= code < 600 and attempt < 2:
                 self._limiter.sleep(1)

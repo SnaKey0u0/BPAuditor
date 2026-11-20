@@ -3,7 +3,7 @@ import json
 import pytest
 
 from bp_auditor.config import Config, config_path
-from bp_auditor.keys import BAD, CHECKING, OK, WARMING, KeyPool, mask
+from bp_auditor.keys import BAD, CHECKING, OK, UNVERIFIED, WARMING, KeyPool, mask
 
 K1 = "RGAPI-11111111-1111-1111-1111-111111111111"
 K2 = "RGAPI-22222222-2222-2222-2222-222222222222"
@@ -145,12 +145,40 @@ def test_摘要_全部失效時顯示錯誤():
     assert "重新產生" in pool.summary().text
 
 
-def test_摘要_還沒有驗證過的Key時顯示驗證中或生效中():
-    pool = pool_of(K1)
-    assert (pool.summary().text, pool.summary().tone) == ("驗證 Key 中…", "busy")
+def test_摘要_驗證中的Key也算可用_另外標驗證中():
+    pool = pool_of(K1, K2)
+    pool.set_status(K2, OK)
+    assert (pool.summary().text, pool.summary().tone) == ("2 / 2 組可用・驗證中…", "busy")
 
+    pool.set_status(K2, WARMING)
+    assert (pool.summary().text, pool.summary().tone) == ("1 / 2 組可用・驗證中…", "busy")
+
+
+def test_摘要_沒有可用的Key但有新Key生效中():
+    pool = pool_of(K1)
     pool.set_status(K1, WARMING)
     assert (pool.summary().text, pool.summary().tone) == ("新 Key 生效中…", "busy")
+
+
+def test_未能驗證的Key仍可用_摘要算進可用數_存檔後下次啟動當作可用():
+    cfg = Config(api_keys=pool_of(K1, K2))
+    cfg.api_keys.set_status(K1, UNVERIFIED)
+    cfg.api_keys.set_status(K2, OK)
+
+    assert cfg.api_keys.get(K1).usable
+    assert cfg.api_keys.first_usable().key == K1
+    assert (cfg.api_keys.summary().text, cfg.api_keys.summary().tone) == ("2 / 2 組可用", "ok")
+    cfg.save()
+    assert Config.load().api_keys.get(K1).status == OK
+
+
+def test_Key清單的snapshot是複本_之後新增刪除不影響():
+    pool = pool_of(K1, K2)
+    snap = pool.snapshot()
+    pool.add(K3, 0.0); pool.remove(K1)
+
+    assert [k.key for k in snap] == [K1, K2]
+    assert [k.key for k in pool] == [K2, K3]
 
 
 def test_遮罩過的Key只露出開頭與結尾():

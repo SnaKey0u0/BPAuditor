@@ -138,11 +138,11 @@ def _spells(p: dict) -> list[int]:
 
 
 def game_summaries(puuid: str, matches: list[dict],
-                   feeding: float = FEEDING_DEATHS_PER_MINUTE) -> list[GameSummary]:
-    """近期戰績的每一場 → 單場摘要，新 → 舊；玩家不在的對戰略過。feeding：送頭場的死亡速率門檻（次/分）。"""
+                   feeding_threshold: float = FEEDING_DEATHS_PER_MINUTE) -> list[GameSummary]:
+    """近期戰績的每一場 → 單場摘要，新 → 舊；玩家不在的對戰略過。feeding_threshold：送頭場的死亡速率門檻（次/分）。"""
     return [GameSummary(p["win"], p["championName"], p["kills"], p["deaths"], p["assists"], _mode(m),
                         remake=is_remake(p), items=_items(p), keystone=_keystone(p), spells=_spells(p),
-                        feeding=is_feeding(p, game_minutes(m), feeding), minutes=game_minutes(m))
+                        feeding=is_feeding(p, game_minutes(m), feeding_threshold), minutes=game_minutes(m))
             for m in matches if (p := participant(m, puuid))]
 
 
