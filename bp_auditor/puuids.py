@@ -70,11 +70,8 @@ class Blacklist:
         self._entries = [e for e in self._entries if e]
 
     def snapshot(self) -> list[Versions]:
-        """給背景執行緒用的複本。"""
+        """給背景執行緒用的複本；也是存檔的格式（from_json 讀回來）。"""
         return [dict(e) for e in self._entries]
-
-    def to_json(self) -> list[Versions]:
-        return self.snapshot()
 
     @classmethod
     def from_json(cls, data, legacy_key: str = "") -> "Blacklist":

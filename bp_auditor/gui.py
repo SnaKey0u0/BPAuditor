@@ -23,7 +23,7 @@ from .analysis import (GameSummary, Mastery, PremadeGroup, detect_premades, game
 from .audit import ME, Audit, AuditOutcome, Me, PlayerResult
 from .champions import Champions, Icon, download_asset, download_icon, icon_dir, icon_path
 from .config import Config
-from .keys import BAD, OK, WARMING, mask
+from .keys import BAD, OK, UNVERIFIED, WARMING, mask
 from .parsing import RiotId, members_to_query, parse_room_messages, room_change, room_members_in_clipboard
 from .riot import KEY_PAGE, RiotClient, RiotError, find_api_key
 from .rotation import KeyRotation, key_row_status, run_rotating
@@ -476,7 +476,7 @@ class PlayerCard(QFrame):
             self.kda.setText(kda_html(s.kda, s.kd))
         else:
             self.big.setText(grey("近期沒有對戰")); self.kda.setText("")
-        games = game_summaries(r.puuid, r.matches, self.win.feeding())
+        games = game_summaries(r.puuid, r.matches, self.win.feeding_threshold())
         self.tiles.set_games(games)  # 全是重開局時統計為空，方塊仍列出
         self.feed_tag.setVisible(any(x.feeding for x in games))
         self.win.prefetch_tip_icons(games)
@@ -553,7 +553,7 @@ class PlayerCard(QFrame):
         self.champ.setText(f"{head}　{body}"); self.champ.show()
 
 
-ROW_COLORS = {"active": GREEN, "ok": GREEN, "cooling": ORANGE, "busy": BLUE, "error": RED}
+ROW_COLORS = {"active": GREEN, "ok": GREEN, "cooling": ORANGE, "warn": ORANGE, "busy": BLUE, "error": RED}
 
 
 def key_row_html(text: str, tone: str) -> str:
@@ -961,8 +961,8 @@ class MainWindow(QMainWindow):
         if kind == "key":
             self.cfg.api_keys.set_status(key, BAD)  # 不自動刪除，由使用者決定
         else:
-            # 驗證通過；或是連線／伺服器問題，分不出 Key 好壞，先當作可用
-            self.cfg.api_keys.set_status(key, OK)
+            # 驗證通過；或是連線／伺服器問題，分不出 Key 好壞，先當作可用（標成「未能驗證」，與驗證過的分開）
+            self.cfg.api_keys.set_status(key, UNVERIFIED if error else OK)
             if error:
                 self.status.setText(f"驗證 Key 時發生錯誤：{error}")
         self.on_keys_changed()
@@ -1015,9 +1015,10 @@ class MainWindow(QMainWindow):
             self.cfg.my_puuids.update(found); self.cfg.save()
         self.settings.show_me_lookup(error)
 
-    def me(self, key: str) -> Me:
-        """本人；PUUID 取 key（這次稽查所用的 Key）的版本。"""
-        return Me(RiotId.parse(self.cfg.my_riot_id) if self.cfg.my_riot_id else None, self.cfg.my_puuid(key))
+    def me(self, key: str, my_puuids: dict[str, str] | None = None) -> Me:
+        """本人；PUUID 取 key（這次稽查所用的 Key）的版本。背景執行緒傳入稽查開始時的 my_puuids 複本，不讀會變的設定。"""
+        puuid = (my_puuids if my_puuids is not None else self.cfg.my_puuids).get(key, "") if key else ""
+        return Me(RiotId.parse(self.cfg.my_riot_id) if self.cfg.my_riot_id else None, puuid)
 
     def is_me(self, m: RiotId) -> bool:
         me = RiotId.parse(self.cfg.my_riot_id) if self.cfg.my_riot_id else None
@@ -1061,7 +1062,7 @@ class MainWindow(QMainWindow):
             else:
                 c.show_champion()
 
-    def feeding(self) -> float:
+    def feeding_threshold(self) -> float:
         """設定頁的送頭場門檻：每分鐘死亡次數。"""
         return self.cfg.feeding_deaths_per_minute
 
@@ -1256,6 +1257,8 @@ class MainWindow(QMainWindow):
             self.rotation.set_current(key)
         first = self.audit_key = key or self.active_key()  # 一次稽查的所有資料都出自同一組 Key（ADR 0002）
         room, prior, games = list(self.room), self.histories, self.cfg.recent_games
+        # 背景執行緒只用複本：介面執行緒可能同時新增／刪除 Key（Key 清單由 rotation 每次取 snapshot）
+        my_puuids = dict(self.cfg.my_puuids)
         everyone = [m for m in room if not m.hidden]
         tries: list[str] = []
 
@@ -1266,8 +1269,8 @@ class MainWindow(QMainWindow):
             if not as_given:  # 換 Key 了：舊 Key 查到的都不要，房間（或對局）裡每個人都用新 Key 重查
                 b.restart.emit(k, len(everyone))
                 if "puuids" in kw:  # 查對面：觀戰資料的 PUUID 是舊 Key 的版本，用新 Key 重查一次對局
-                    kw["puuids"] = self._game_puuids(k, client, room)
-            Audit(client, room, self.me(k), games, query=query if as_given else everyone,
+                    kw["puuids"] = self._game_puuids(my_puuids.get(k, ""), client, room)
+            Audit(client, room, self.me(k, my_puuids), games, query=query if as_given else everyone,
                   prior=prior if as_given else {}, on_player=lambda r: b.player.emit(r, k),
                   on_me=lambda m: b.me.emit(m, k), on_outcome=b.outcome.emit, on_mastery=b.mastery.emit,
                   **kw).execute()
@@ -1281,10 +1284,10 @@ class MainWindow(QMainWindow):
                 b.done.emit()
         threading.Thread(target=run, daemon=True).start()
 
-    def _game_puuids(self, key: str, client: RiotClient, room: list[RiotId]) -> dict[str, str]:
-        """（背景執行緒）用 key 重查一次進行中的對局，取得 room 每個人在這組 Key 的 PUUID；
-        查不到的人由稽查改用 Riot ID 查帳號。"""
-        me = self.cfg.my_puuid(key)
+    @staticmethod
+    def _game_puuids(me: str, client: RiotClient, room: list[RiotId]) -> dict[str, str]:
+        """（背景執行緒）用 client 的 Key 重查一次進行中的對局（me：本人在這組 Key 的 PUUID），取得 room 每個人
+        在這組 Key 的 PUUID；查不到的人由稽查改用 Riot ID 查帳號。"""
         try:
             return game_puuids(client.active_game(me) if me else None, room)
         except RiotError:
@@ -1427,9 +1430,10 @@ class MainWindow(QMainWindow):
         if manual:
             self.poll_timer.stop()  # 手動查過就不再自動查
             self.status.setText("查詢對局中…")
+        my_puuids = dict(self.cfg.my_puuids)  # 背景執行緒只用複本
 
         def job(k: str, client: RiotClient):  # 冷卻或失效時換 Key 重查；觀戰資料的 PUUID 是查詢所用那組 Key 的版本
-            if not (me := self.cfg.my_puuid(k)):
+            if not (me := my_puuids.get(k, "")):
                 raise RiotError("not_found", "還沒查到你在這組 Key 的 PUUID，請確認設定裡你的 Riot ID")
             return client.active_game(me), k
 

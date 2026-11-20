@@ -65,7 +65,7 @@ class Config:
     def save(self):
         p = config_path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        data = {**asdict(self), "api_keys": self.api_keys.to_json(), "blacklist": self.blacklist.to_json()}
+        data = {**asdict(self), "api_keys": self.api_keys.to_json(), "blacklist": self.blacklist.snapshot()}
         p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 

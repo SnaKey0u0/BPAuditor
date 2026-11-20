@@ -11,7 +11,7 @@ import pytest
 
 from bp_auditor.audit import Audit, Me
 from bp_auditor.parsing import RiotId
-from bp_auditor.keys import BAD, CHECKING, OK, WARMING, ApiKey, KeyPool
+from bp_auditor.keys import BAD, CHECKING, OK, UNVERIFIED, WARMING, ApiKey, KeyPool
 from bp_auditor.riot import RateLimiter, RiotError
 from bp_auditor.rotation import KeyRotation, key_row_status, run_rotating
 from tests.test_analysis import match
@@ -131,10 +131,39 @@ def test_輪替_冷卻中換Key的目標_有空的就換_全部冷卻就挑最�
     assert rot.switch_target(K1, 5) is None  # 自己比別人都早解除：留下來等
 
 
-def test_輪替_只等一下下的限速不換Key():
-    """每秒 20 次的限速幾乎每次稽查都會碰到，只要等不到 1 秒；為這個換 Key 重跑只會白費請求。"""
+def test_輪替_要等不到換Key門檻的限速不換Key():
+    """要等不到 switch_after（2 秒）不算冷卻：每秒 20 次的限速幾乎每次稽查都會碰到、只要等不到 1 秒，
+    為這個換 Key 重跑只會白費請求。等到門檻以上才換。"""
     rot = rotation_of(pool_of(K1, K2))
+    assert rot.switch_after == 2.0
     assert rot.switch_target(K1, 0.8) is None
+    assert rot.switch_target(K1, 1.99) is None
+    assert rot.switch_target(K1, 2.0) == K2
+
+
+def test_輪替_可用的Key數_驗證中與未能驗證的也算():
+    pool = KeyPool([ApiKey(K1, 0.0, OK), ApiKey(K2, 0.0, CHECKING), ApiKey(K3, 0.0, UNVERIFIED),
+                    ApiKey(K4, 0.0, BAD)])
+    rot = rotation_of(pool)
+    assert rot.usable_count() == 3
+    pool.remove(K1)
+    assert rot.usable_count() == 2  # 每次都看目前的清單
+
+
+def test_輪替_走訪的是Key清單的複本_背景執行緒挑Key時介面刪除Key不會出錯():
+    pool = pool_of(K1, K2, K3)
+
+    class RemovingPool(KeyPool):
+        def snapshot(self):
+            snap = super().snapshot()
+            self.remove(K1)  # 模擬介面執行緒在背景走訪清單途中刪掉 Key
+            return snap
+
+    removing = RemovingPool(list(pool))
+    rot = rotation_of(removing)
+    assert rot.current() == K1  # 依取到的複本挑 Key
+    assert [k.key for k in removing] == [K2, K3]
+    assert rot.current() == K2  # 下一次取新的複本：K1 已經不在
 
 
 def test_輪替_只有一組Key時沒得換():
@@ -195,7 +224,8 @@ def test_目前的Key回429時_換下一組從頭重跑_最終結果的PUUID都�
     assert run.clock.slept == 0
 
 
-def test_本地限速達到上限時_換下一組_不會先等待():
+def test_本地限速要等超過換Key門檻時_換下一組_不會先等待():
+    """120 秒的視窗額滿、要等遠超過 switch_after（2 秒）：算冷卻，直接換 Key 重跑，不先等。"""
     run = Run(pool_of(K1, K2), limits=((20, 120.0),))
     for _ in range(15):  # K1 之前已經用掉 15 次，這次稽查（約 12 次）用到一半就額滿
         run.rot.limiter(K1).try_acquire()
@@ -284,4 +314,6 @@ def test_設定頁每一列的狀態_使用中與冷卻倒數():
     assert key_row_status(ok, active=True, cooldown=0.6) == ("✓ 使用中", "active")  # 每秒限速的短暫等待不算冷卻
     assert key_row_status(ApiKey(K1, 0.0, BAD), active=False, cooldown=37) == ("失效，請重新產生", "error")
     assert key_row_status(ApiKey(K1, 0.0, CHECKING), active=False, cooldown=0) == ("驗證中…", "grey")
+    assert key_row_status(ApiKey(K1, 0.0, UNVERIFIED), active=False, cooldown=0) == ("⚠ 未能驗證", "warn")
+    assert key_row_status(ApiKey(K1, 0.0, UNVERIFIED), active=True, cooldown=0) == ("✓ 使用中", "active")
     assert key_row_status(ApiKey(K1, 0.0, WARMING), active=False, cooldown=0) == ("新 Key 生效中…", "busy")

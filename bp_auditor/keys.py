@@ -9,8 +9,9 @@ from dataclasses import dataclass
 CHECKING = "checking"  # 剛加入，驗證中
 WARMING = "warming"  # 剛產生的 Key 回 401/403：Riot 還沒啟用，每 15 秒重驗
 OK = "ok"
+UNVERIFIED = "unverified"  # 驗證時連線／伺服器出錯，分不出 Key 好壞：先當作可用，但畫面上與驗證過的分開標示
 BAD = "bad"  # 回 401/403 且不是剛產生的：失效，請使用者重新產生；不自動刪除
-_USABLE = (CHECKING, OK)
+_USABLE = (CHECKING, OK, UNVERIFIED)
 
 
 @dataclass
@@ -41,6 +42,10 @@ class KeyPool:
 
     def __len__(self) -> int:
         return len(self._entries)
+
+    def snapshot(self) -> list[ApiKey]:
+        """給背景執行緒走訪用的複本（清單本身的複本；每組 Key 仍是同一個物件，狀態改了大家都看得到）。"""
+        return list(self._entries)
 
     def get(self, key: str) -> ApiKey | None:
         key = key.strip()
@@ -75,17 +80,21 @@ class KeyPool:
         return bool(self._entries) and all(k.status == BAD for k in self._entries)
 
     def summary(self) -> PoolSummary:
-        """整個清單的狀態，給側欄與設定頁。"""
+        """整個清單的狀態，給側欄與設定頁。
+
+        「幾組可用」與 ApiKey.usable 一致：驗證中與未能驗證的 Key 也會拿來稽查，所以都算可用；
+        還有 Key 在驗證中時另外標「驗證中」（busy）。"""
         if not self._entries:
             return PoolSummary("未設定 Key", "error")
         if self.all_bad:
             return PoolSummary("Key 全部失效，請重新產生", "error")
-        ok = sum(k.status == OK for k in self._entries)
-        if not ok:
-            if any(k.status == CHECKING for k in self._entries):
-                return PoolSummary("驗證 Key 中…", "busy")
+        usable = sum(k.usable for k in self._entries)
+        if not usable:
             return PoolSummary("新 Key 生效中…", "busy")
-        return PoolSummary(f"{ok} / {len(self._entries)} 組可用", "ok")
+        text = f"{usable} / {len(self._entries)} 組可用"
+        if any(k.status == CHECKING for k in self._entries):
+            return PoolSummary(text + "・驗證中…", "busy")
+        return PoolSummary(text, "ok")
 
     # ─── 存檔 ───
     def to_json(self) -> list[dict]:
