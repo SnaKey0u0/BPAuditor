@@ -1,17 +1,19 @@
-from bp_auditor.analysis import (STREAK_MIN, FeedingThresholds, detect_premades, find_encounter, game_summaries,
-                                 mastery, ranks, recent_stats, split_game, streak)
+from bp_auditor.analysis import (STREAK_MIN, detect_premades, find_encounter, game_summaries,
+                                 game_puuids, mastery, ranks, recent_stats, split_game, streak)
 
 
 def match(mid, team100, team200, *, win100=True, champ="Ahri", kda=(2, 1, 3), queue=450, mode="ARAM",
-          remake=False, surrender=False):
-    """team100/team200: puuid 清單。remake=True：重開局（提早投降）；surrender=True：一般投降。"""
+          remake=False, surrender=False, minutes=30):
+    """team100/team200: puuid 清單。remake=True：重開局（提早投降）；surrender=True：一般投降。
+    minutes：整局時長（match-v5 的 gameDuration 以秒為單位）。"""
     ps = []
     for team, members, win in ((100, team100, win100), (200, team200, not win100)):
         for pu in members:
             ps.append(dict(puuid=pu, teamId=team, win=win, championName=champ, summonerLevel=100,
                            kills=kda[0], deaths=kda[1], assists=kda[2],
                            gameEndedInEarlySurrender=remake, gameEndedInSurrender=surrender))
-    return {"metadata": {"matchId": mid}, "info": {"participants": ps, "queueId": queue, "gameMode": mode}}
+    return {"metadata": {"matchId": mid}, "info": {"participants": ps, "queueId": queue, "gameMode": mode,
+                                                   "gameDuration": round(minutes * 60), "gameEndTimestamp": 1}}
 
 
 def test_recent_stats():
@@ -89,56 +91,58 @@ def test_game_summaries_flag_remake_but_not_normal_surrender():
     assert [g.remake for g in game_summaries("a", ms)] == [True, False, False]
 
 
-def _feeding(kda, remake=False, **thresholds):
-    """單場 K/D/A → 該場是否為送頭場（門檻未給就用預設 2／0.5／10）。"""
-    ms = [match("1", ["a"], ["x"], kda=kda, remake=remake)]
-    return game_summaries("a", ms, FeedingThresholds(**thresholds)).pop().feeding
+def _feeding(deaths, minutes, *, kills=0, assists=0, remake=False, threshold=None):
+    """單場死亡數與整局時長（分鐘）→ 該場是否為送頭場（門檻未給就用預設每分鐘 0.5）。"""
+    ms = [match("1", ["a"], ["x"], kda=(kills, deaths, assists), remake=remake, minutes=minutes)]
+    args = () if threshold is None else (threshold,)
+    return game_summaries("a", ms, *args).pop().feeding
 
 
-def test_feeding_game_when_only_kda_condition_met():
-    assert _feeding((6, 10, 12)) is True  # KDA 1.8 < 2，KD 0.6 > 0.5
+def test_feeding_game_when_death_rate_equals_threshold():
+    assert _feeding(10, 20) is True  # 每分鐘 0.5，剛好等於預設門檻
 
 
-def test_feeding_game_when_only_kd_condition_met():
-    assert _feeding((4, 10, 30)) is True  # KDA 3.4 ≥ 2，KD 0.4 ≤ 0.5
+def test_not_feeding_game_when_death_rate_below_threshold():
+    assert _feeding(9, 20) is False  # 每分鐘 0.45
 
 
-def test_feeding_game_when_both_conditions_met():
-    assert _feeding((1, 12, 2)) is True
+def test_same_deaths_only_shorter_game_reaches_threshold():
+    assert _feeding(10, 15) is True   # 每分鐘 0.67
+    assert _feeding(10, 25) is False  # 每分鐘 0.4
 
 
-def test_not_feeding_game_when_deaths_below_threshold():
-    assert _feeding((0, 9, 0)) is False
-
-
-def test_feeding_game_kd_equal_to_threshold_counts():
-    assert _feeding((5, 10, 20)) is True  # KDA 2.5，KD 剛好 0.5
-
-
-def test_not_feeding_game_when_kda_equal_to_threshold():
-    assert _feeding((6, 10, 14)) is False  # KDA 剛好 2.0，KD 0.6
-
-
-def test_feeding_game_zero_deaths_counted_as_one():
-    assert _feeding((0, 0, 1), min_deaths=0) is True  # KDA 1.0、KD 0.0，不會除以零
-    assert _feeding((3, 0, 3), min_deaths=0) is False  # KDA 6、KD 3
-
-
-def test_custom_feeding_thresholds_change_the_judgement():
-    assert _feeding((1, 12, 2), min_deaths=15) is False
-    assert _feeding((3, 5, 2), min_deaths=5) is True
-    assert _feeding((6, 10, 14), kda_below=2.5) is True
-    assert _feeding((5, 10, 20), kd_at_most=0.4) is False
+def test_high_kda_still_feeding_when_death_rate_reaches_threshold():
+    assert _feeding(10, 20, kills=30, assists=40) is True  # KDA 7、KD 3，KDA／KD 不再影響判定
 
 
 def test_remake_never_a_feeding_game():
-    assert _feeding((0, 12, 0), remake=True) is False
+    assert _feeding(3, 3, remake=True) is False  # 每分鐘 1 次，但是重開局
 
 
-def test_game_summaries_default_thresholds_and_per_game_kda_kd():
-    g = game_summaries("a", [match("1", ["a"], ["x"], kda=(3, 12, 5))])[0]
-    assert (g.feeding, g.kda, g.kd) == (True, 8 / 12, 3 / 12)
-    assert game_summaries("a", [match("1", ["a"], ["x"], kda=(3, 0, 5))])[0].kda == 8.0
+def test_custom_threshold_changes_the_judgement():
+    assert _feeding(10, 20, threshold=0.6) is False
+    assert _feeding(6, 20, threshold=0.3) is True
+
+
+def test_game_summary_minutes_and_death_rate_from_whole_game_duration():
+    m = match("1", ["a"], ["x"], kda=(2, 9, 4), minutes=18)
+    m["info"]["participants"][0]["timePlayed"] = 300  # 該玩家自己的在線時間不採用
+    g = game_summaries("a", [m])[0]
+    assert (g.minutes, g.death_rate, g.feeding) == (18, 0.5, True)
+
+
+def test_pre_11_20_game_duration_in_milliseconds():
+    m = match("1", ["a"], ["x"], kda=(0, 10, 0))
+    m["info"]["gameDuration"] = 20 * 60_000
+    del m["info"]["gameEndTimestamp"]
+    g = game_summaries("a", [m])[0]
+    assert (g.minutes, g.feeding) == (20, True)
+
+
+def test_missing_game_duration_never_feeding():
+    m = match("1", ["a"], ["x"], kda=(0, 10, 0))
+    del m["info"]["gameDuration"]
+    assert game_summaries("a", [m])[0].feeding is False
 
 
 def _games(*results):
@@ -255,3 +259,15 @@ def test_split_game_keeps_hidden_players_and_skips_bots():
     assert [(p.label, p.puuid, p.champion_key) for p in allies] == [("我#TW2", "me", 103), ("A#1", "a", 1),
                                                                       ("Soraka", "", 16)]
     assert [p.label for p in enemies] == ["X#1"]
+
+
+def test_game_puuids_maps_room_labels_to_this_keys_puuids():
+    """換 Key 重跑查對面：用新 Key 重查一次對局，把房間標籤（沿用房間裡的大小寫）對到新 Key 的 PUUID。"""
+    from bp_auditor.parsing import RiotId
+    game = {"participants": [
+        {"puuid": "k2-me", "teamId": 100, "riotId": "我#TW2"},
+        {"puuid": "k2-a", "teamId": 100, "riotId": "a#1"},
+        {"puuid": None, "teamId": 200, "riotId": "Soraka"}]}
+    room = [RiotId("我", "TW2"), RiotId("A", "1"), RiotId("離開了", "1")]
+    assert game_puuids(game, room) == {"我#TW2": "k2-me", "A#1": "k2-a"}
+    assert game_puuids(None, room) == {}
