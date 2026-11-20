@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QSpacerItem, QStackedWidget, QSystemTrayIcon, QToolTip, QVBoxLayout, QWidget,
 )
 
-from . import autostart, single
+from . import autostart, puuids, single
 from .analysis import (GameSummary, Mastery, PremadeGroup, detect_premades, game_summaries,
                        split_game, streak)
 from .audit import ME, Audit, AuditOutcome, Me, PlayerResult
@@ -113,15 +113,16 @@ def points(n: int) -> str:
 
 class Bridge(QObject):
     """把背景執行緒的結果安全地送回 UI 執行緒。"""
-    player = Signal(object)
+    player = Signal(object, str)  # (PlayerResult, 這次稽查所用的 Key：PUUID 依 Key 加密)
     outcome = Signal(object)
-    me = Signal(object)
+    me = Signal(object, str)  # (Me, 查出這個 PUUID 的 Key)
     done = Signal()
     champions = Signal(object)
     key_checked = Signal(str, str, str)  # (key, 錯誤種類, 錯誤訊息)；種類為空字串代表有效
-    me_lookup = Signal(str, str, str)  # (Riot ID, puuid, 錯誤訊息)
+    me_lookup = Signal(str, object, str)  # (Riot ID, {Key: puuid}, 錯誤訊息)；某組查不到時其他組照樣存
+    versions = Signal(object)  # list[Version]：黑名單其他 Key 的版本，背景換算回來
     icon_ready = Signal()
-    game = Signal(object, str, bool)  # (進行中對局或 None, 錯誤訊息, 是否手動)
+    game = Signal(object, str, bool, str)  # (進行中對局或 None, 錯誤訊息, 是否手動, 查詢所用的 Key)
     mastery = Signal(str, object)  # (標籤, Mastery 或 None)
 
 
@@ -321,6 +322,7 @@ class PlayerCard(QFrame):
         self.mastery: Mastery | None = None
         self.mastery_loaded = False
         self.puuid = ""  # 稽查結果回來才有；黑名單以此判定
+        self.puuid_key = ""  # self.puuid 是用哪一組 Key 查到的（PUUID 依 Key 加密，黑名單要比對同一組的版本）
         self.blacklisted = False
         self.set_stripe(None)
         v = QVBoxLayout(self); v.setContentsMargins(12, 8, 10, 8); v.setSpacing(4)
@@ -406,13 +408,13 @@ class PlayerCard(QFrame):
 
     def toggle_blacklist(self):
         if self.puuid and not self.is_me:
-            self.win.cfg.toggle_blacklist(self.puuid)
+            self.win.toggle_blacklist(self.puuid_key, self.puuid)
         self.show_blacklist()
 
     def show_blacklist(self):
         """依設定檔的黑名單更新「!」按鈕、標籤與卡片顏色；沒有 PUUID（查詢中／失敗）時按鈕不可用。"""
         usable = bool(self.puuid) and not self.is_me and not self.hidden
-        self.blacklisted = usable and self.win.cfg.is_blacklisted(self.puuid)
+        self.blacklisted = usable and self.win.cfg.is_blacklisted(self.puuid_key, self.puuid)
         self.flag.setEnabled(usable)
         self.flag.setChecked(self.blacklisted)
         self.flag.setToolTip("已在黑名單（再點一次移除）" if self.blacklisted else "加入黑名單")
@@ -645,7 +647,7 @@ class SettingsPage(QWidget):
         rid = RiotId.parse(text) if text else None
         if text and (rid is None or "進入組隊房間" in text):
             self._me_state(f"<span style='color:{RED}'>格式是 名稱#標籤</span>"); return
-        cfg.my_riot_id, cfg.my_puuid = text, ""
+        cfg.my_riot_id, cfg.my_puuids = text, {}  # 換了本人：每組 Key 都用新的 Riot ID 重查
         cfg.save()
         self._me_state("")
         if rid and self.win.active_key():
@@ -698,7 +700,6 @@ class MainWindow(QMainWindow):
         self.asset_slots = threading.Semaphore(4)  # 提示框圖示一次可能上百個，限制同時下載數
         self.waiting_key = False
         self.audit_key = ""  # 上一次稽查用的 Key；Key 有問題時知道是哪一組
-        self.puuid_key = self.active_key()  # cfg.my_puuid 是用哪一組 Key 查的（PUUID 依 Key 加密）
         self.me_note = ""
         self.quitting = False
         self.view = "room"  # "room"：房間成員單欄；"game"：遊戲中左右兩隊
@@ -712,6 +713,7 @@ class MainWindow(QMainWindow):
         b.player.connect(self.on_player); b.outcome.connect(self.on_outcome); b.me.connect(self.on_me)
         b.done.connect(self.on_done); b.champions.connect(self.on_champions)
         b.key_checked.connect(self.on_key_checked); b.me_lookup.connect(self.on_me_lookup)
+        b.versions.connect(self.cfg.add_versions)
         b.icon_ready.connect(self.refresh_cards)
         b.game.connect(self.on_game); b.mastery.connect(self.on_mastery)
 
@@ -842,8 +844,11 @@ class MainWindow(QMainWindow):
         k = self.cfg.api_keys.first_usable()
         return k.key if k else ""
 
-    def client(self) -> RiotClient:
-        return RiotClient(self.active_key(), self.limiter)
+    def client_for(self, key: str) -> RiotClient:
+        return RiotClient(key, self.limiter)
+
+    def usable_keys(self, but: str = "") -> list[str]:
+        return [k.key for k in self.cfg.api_keys if k.usable and k.key != but]
 
     def key_warming(self) -> bool:
         """沒有可用的 Key，但有新 Key 在等 Riot 啟用：這段期間的稽查先排隊。"""
@@ -864,17 +869,8 @@ class MainWindow(QMainWindow):
             self.show_key_banner("所有 API Key 都失效了，請重新產生", "取得新 Key")
 
     def on_keys_changed(self):
-        """清單或狀態變了：存檔、重畫；使用中的 Key 換了，本人的 PUUID 要用新 Key 重查（PUUID 依 Key 加密）。"""
-        active = self.active_key()
-        changed = active != self.puuid_key
-        if changed:
-            self.puuid_key, self.cfg.my_puuid = active, ""
+        """清單或狀態變了：存檔、重畫。本人與黑名單每組 Key 各有一份 PUUID，換使用中的 Key 不必重查。"""
         self.cfg.save()
-        if changed:
-            entry = self.cfg.api_keys.get(active) if active else None
-            rid = RiotId.parse(self.cfg.my_riot_id) if self.cfg.my_riot_id else None
-            if entry and entry.status == OK and rid:  # 還在驗證中的 Key 等驗證通過再查（on_key_checked）
-                self.lookup_me(rid)
         self.update_key_status()
 
     def start_key_refresh(self):
@@ -894,7 +890,7 @@ class MainWindow(QMainWindow):
         return True
 
     def remove_key(self, key: str):
-        if self.cfg.api_keys.remove(key):
+        if self.cfg.remove_key(key):  # 本人與黑名單中它那個版本一併刪掉
             self.key_banner.hide()
             self.on_keys_changed()
 
@@ -930,16 +926,25 @@ class MainWindow(QMainWindow):
             if error:
                 self.status.setText(f"驗證 Key 時發生錯誤：{error}")
         self.on_keys_changed()
+        if kind != "key":
+            self.backfill_key(key)
         if not error:
             if self.pending and not self.running and not self.key_warming():
                 members, auto, force = self.pending
                 self.pending = None
                 self.start_room(members, auto, force)
-            if self.cfg.my_riot_id and not self.cfg.my_puuid:
-                rid = RiotId.parse(self.cfg.my_riot_id)
-                if rid:
-                    self.lookup_me(rid)
         QApplication.alert(self)
+
+    def backfill_key(self, key: str):
+        """Key 可用之後：本人用 Riot ID 查一次這組 Key 的 PUUID；黑名單每筆用既有的可用 Key 換算出這組的版本。
+        只補還沒有這組版本的，重複呼叫不會多查。"""
+        rid = RiotId.parse(self.cfg.my_riot_id) if self.cfg.my_riot_id else None
+        if rid and not self.cfg.my_puuid(key):
+            self.lookup_me(rid, [key])
+        entries, sources = self.cfg.blacklist.snapshot(), self.usable_keys(but=key)
+        if entries and sources:
+            threading.Thread(target=lambda: self.bridge.versions.emit(puuids.backfill(entries, key, sources, self.client_for)),
+                             daemon=True).start()
 
     def show_key_banner(self, text: str, button: str):
         self.key_banner_text.setText(text); self.key_banner_btn.setText(button)
@@ -952,36 +957,51 @@ class MainWindow(QMainWindow):
             self.show_settings()
 
     # ─── 本人 ───
-    def lookup_me(self, rid: RiotId):
+    def lookup_me(self, rid: RiotId, keys: list[str] | None = None):
+        """用本人的 Riot ID 在每組 Key（預設：所有可用的 Key）下各查一次 PUUID。"""
+        keys = self.usable_keys() if keys is None else keys
+
         def run():
-            try:
-                puuid = self.client().account_puuid(rid.name, rid.tag)
-                self.bridge.me_lookup.emit(str(rid), puuid, "")
-            except RiotError as e:
-                self.bridge.me_lookup.emit(str(rid), "", "找不到這個 Riot ID" if e.kind == "not_found" else str(e))
+            found, e = puuids.lookup_me(rid, keys, self.client_for)
+            error = "" if found or e is None else "找不到這個 Riot ID" if e.kind == "not_found" else str(e)
+            self.bridge.me_lookup.emit(str(rid), found, error)
         threading.Thread(target=run, daemon=True).start()
 
-    def on_me_lookup(self, rid: str, puuid: str, error: str):
+    def on_me_lookup(self, rid: str, found: dict, error: str):
         if rid != self.cfg.my_riot_id:
             return
-        if puuid:
-            self.cfg.my_puuid = puuid; self.cfg.save()
+        found = {k: v for k, v in found.items() if self.cfg.api_keys.get(k)}  # 查詢期間被刪掉的 Key 不存
+        if found:
+            self.cfg.my_puuids.update(found); self.cfg.save()
         self.settings.show_me_lookup(error)
 
-    def me(self) -> Me:
-        return Me(RiotId.parse(self.cfg.my_riot_id) if self.cfg.my_riot_id else None, self.cfg.my_puuid)
+    def me(self, key: str) -> Me:
+        """本人；PUUID 取 key（這次稽查所用的 Key）的版本。"""
+        return Me(RiotId.parse(self.cfg.my_riot_id) if self.cfg.my_riot_id else None, self.cfg.my_puuid(key))
 
     def is_me(self, m: RiotId) -> bool:
-        me = self.me().riot_id
+        me = RiotId.parse(self.cfg.my_riot_id) if self.cfg.my_riot_id else None
         return bool(me and m.same_as(me))
 
-    def on_me(self, me: Me):
+    def on_me(self, me: Me, key: str):
+        """稽查中查到本人改名，或補查到 key 的 PUUID。改名不影響其他 Key 的 PUUID（帳號不變）；
+        其他還沒有版本的 Key 用新的 Riot ID 補查。"""
         old = self.cfg.my_riot_id
-        self.cfg.my_riot_id, self.cfg.my_puuid = str(me.riot_id), me.puuid
+        self.cfg.my_riot_id = str(me.riot_id)
+        if self.cfg.api_keys.get(key):
+            self.cfg.my_puuids[key] = me.puuid
         self.cfg.save()
         self.settings.me.setText(self.cfg.my_riot_id)
         if old and RiotId.parse(old) != me.riot_id:
             self.me_note = f"你的 Riot ID 已更新為 {me.riot_id}"
+        if missing := [k for k in self.usable_keys() if not self.cfg.my_puuid(k)]:
+            self.lookup_me(me.riot_id, missing)
+
+    def toggle_blacklist(self, key: str, puuid: str):
+        """切換黑名單（puuid 出自 key）；加入時用其他可用的 Key 各換算一份，換 Key 稽查也認得。"""
+        if self.cfg.toggle_blacklist(key, puuid) and (targets := self.usable_keys(but=key)):
+            threading.Thread(target=lambda: self.bridge.versions.emit(puuids.spread(key, puuid, targets, self.client_for)),
+                             daemon=True).start()
 
     # ─── 雜項 ───
     def _load_champions(self):
@@ -1183,28 +1203,29 @@ class MainWindow(QMainWindow):
         self.show_premades(detect_premades(self.histories))
         self.status.setText("有人離開，已移除")
 
-    def _run_audit(self, query: list[RiotId], **game):
+    def _run_audit(self, query: list[RiotId], key: str = "", **game):
         self.running, self.done_count, self.total, self.t0 = True, 0, len(query), time.monotonic()
         self.me_note = ""
         self.audit_btn.setEnabled(False)
         self.update_progress()
         self.progress_timer.start(500)
         b = self.bridge
-        self.audit_key = self.active_key()
-        audit = Audit(RiotClient(self.audit_key, self.limiter), self.room, self.me(), self.cfg.recent_games, query=query, prior=self.histories,
-                      on_player=b.player.emit, on_me=b.me.emit, on_outcome=b.outcome.emit, on_done=b.done.emit,
-                      on_mastery=b.mastery.emit, **game)
+        key = self.audit_key = key or self.active_key()  # 一次稽查的所有資料都出自同一組 Key（ADR 0002）
+        audit = Audit(self.client_for(key), self.room, self.me(key), self.cfg.recent_games, query=query,
+                      prior=self.histories, on_player=lambda r: b.player.emit(r, key), on_me=lambda m: b.me.emit(m, key),
+                      on_outcome=b.outcome.emit, on_done=b.done.emit, on_mastery=b.mastery.emit, **game)
         threading.Thread(target=audit.run, daemon=True).start()
 
-    def on_player(self, r: PlayerResult):
+    def on_player(self, r: PlayerResult, key: str):
         k = key_of(r.riot_id)
         if card := self.cards.get(k):
+            card.puuid_key = key
             card.show_result(r)
             if r.is_me:
                 self._mark_me(card, k)
         self.done_count += 1
         self.update_progress()
-        entry = self.cfg.api_keys.get(self.audit_key) if r.error and r.error.kind == "key" else None
+        entry = self.cfg.api_keys.get(key) if r.error and r.error.kind == "key" else None
         if entry and self.key_is_fresh(entry.key):
             if entry.status != WARMING and self.view == "room":
                 self.pending = (self.room, False, True)  # Key 生效後整房重查
@@ -1259,15 +1280,15 @@ class MainWindow(QMainWindow):
             self.pending = None
             self.start_room(members, auto, force)
         elif self.pending_game:
-            game, self.pending_game = self.pending_game, None
-            self.start_game(game)
+            (game, key), self.pending_game = self.pending_game, None
+            self.start_game(game, key)
         elif self.view == "room" and self.room:
             self.start_polling()
 
     # ─── 查對面（Riot 觀戰 API，不讀遊戲客戶端） ───
     def start_polling(self):
         """房間稽查完：等 90 秒後每 20 秒查一次；查到開局或手動查過就停。"""
-        if self.cfg.my_puuid and not self.poll_timer.isActive():
+        if self.cfg.my_puuid(self.active_key()) and not self.poll_timer.isActive():
             self.poll_until = time.monotonic() + GAME_POLL_DELAY_MS / 1000 + GAME_POLL_FOR
             self.poll_timer.start(GAME_POLL_DELAY_MS)
             self.poll_tick.start(200)
@@ -1293,8 +1314,9 @@ class MainWindow(QMainWindow):
             self.check_game(manual=False)
 
     def check_game(self, manual: bool):
-        puuid = self.cfg.my_puuid
-        if not puuid or not self.active_key():
+        key = self.active_key()
+        puuid = self.cfg.my_puuid(key)  # 觀戰資料的 PUUID 也是這組 Key 的版本，對面要用同一組查
+        if not puuid:
             if manual:
                 self.status.setText("先在設定填好 API Key 和你的 Riot ID")
             return
@@ -1304,12 +1326,12 @@ class MainWindow(QMainWindow):
 
         def run():
             try:
-                self.bridge.game.emit(self.client().active_game(puuid), "", manual)
+                self.bridge.game.emit(self.client_for(key).active_game(puuid), "", manual, key)
             except RiotError as e:
-                self.bridge.game.emit(None, str(e), manual)
+                self.bridge.game.emit(None, str(e), manual, key)
         threading.Thread(target=run, daemon=True).start()
 
-    def on_game(self, game: dict | None, error: str, manual: bool):
+    def on_game(self, game: dict | None, error: str, manual: bool, key: str):
         if error:
             if manual:
                 self.status.setText(error)
@@ -1323,17 +1345,20 @@ class MainWindow(QMainWindow):
                 self.status.setText("已經是這場了")
             return
         self.poll_timer.stop()
-        self.start_game(game)
+        self.start_game(game, key)
 
-    def start_game(self, game: dict):
+    def start_game(self, game: dict, key: str):
+        """key：查到這場對局的 Key；觀戰資料裡的 PUUID 是它的版本，整次稽查都用它。"""
         if self.running:
-            self.pending_game = game; return
-        me = self.cfg.my_puuid
+            self.pending_game = (game, key); return
+        me = self.cfg.my_puuid(key)
         allies, enemies = split_game(game, me)
         if not any(p.puuid == me for p in allies):
             self.status.setText("對局資料裡找不到你"); return
         self.game_id = game.get("gameId")
         in_room = {key_of(m): m for m in self.room}
+        if key != self.audit_key:  # 房間階段的結果出自別組 Key，PUUID 對不上，不沿用（ADR 0002）
+            self.histories = {}
 
         def rid_of(p) -> RiotId:  # 沿用房間裡的寫法，房間成員的近期戰績才對得上標籤
             r = RiotId.parse(p.label) or RiotId(p.puuid[:8], "?")
@@ -1343,7 +1368,7 @@ class MainWindow(QMainWindow):
         for c in old.values():
             c.setParent(None)  # 先拿下來，換版面時才不會被一起刪掉
         self._reset_game_view()
-        query, room, puuids, champs = [], [], {}, {}
+        query, room, known, champs = [], [], {}, {}
         sides = [[ME], []]
         hidden = 0
         allies.sort(key=lambda p: p.puuid != me)  # 本人排在我方第一個
@@ -1355,7 +1380,7 @@ class MainWindow(QMainWindow):
                     card.set_champion(p.champion_key); card.show_hidden()
                     continue
                 rid = rid_of(p)
-                room.append(rid); puuids[str(rid)] = p.puuid
+                room.append(rid); known[str(rid)] = p.puuid
                 champs[str(rid)] = p.champion_key
                 is_me = p.puuid == me
                 if not is_me:
@@ -1375,7 +1400,7 @@ class MainWindow(QMainWindow):
         self.room, self.enemies = room, set(sides[1])
         self.notify()
         self.show_results()
-        self._run_audit(query, puuids=puuids, champions=champs, sides=sides)
+        self._run_audit(query, key, puuids=known, champions=champs, sides=sides)
 
     def on_mastery(self, label: str, m: Mastery | None):
         if c := self.cards.get(label.casefold()):
