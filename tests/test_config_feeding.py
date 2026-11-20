@@ -12,17 +12,27 @@ def temp_appdata(tmp_path, monkeypatch):
     assert config_path().is_relative_to(tmp_path)
 
 
-def test_feeding_thresholds_survive_save_and_reload():
+def test_feeding_threshold_survives_save_and_reload():
     cfg = Config()
-    cfg.feeding_kda_below, cfg.feeding_kd_at_most, cfg.feeding_min_deaths = 1.5, 0.3, 12
+    cfg.feeding_deaths_per_minute = 0.65
     cfg.save()
-    loaded = Config.load()
-    assert (loaded.feeding_kda_below, loaded.feeding_kd_at_most, loaded.feeding_min_deaths) == (1.5, 0.3, 12)
+    assert Config.load().feeding_deaths_per_minute == 0.65
 
 
-def test_old_config_without_feeding_thresholds_loads_defaults():
+def test_old_config_without_feeding_threshold_loads_default():
     p = config_path()
     p.parent.mkdir(parents=True)
     p.write_text(json.dumps({"api_key": "k", "recent_games": 7}), encoding="utf-8")
     cfg = Config.load()
-    assert (cfg.recent_games, cfg.feeding_kda_below, cfg.feeding_kd_at_most, cfg.feeding_min_deaths) == (7, 2.0, 0.5, 10)
+    assert (cfg.recent_games, cfg.feeding_deaths_per_minute) == (7, 0.5)
+
+
+def test_old_config_with_only_the_three_old_thresholds_loads_default():
+    p = config_path()
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"api_key": "k", "feeding_kda_below": 1.5, "feeding_kd_at_most": 0.3,
+                             "feeding_min_deaths": 12}), encoding="utf-8")
+    cfg = Config.load()
+    assert (cfg.api_key, cfg.feeding_deaths_per_minute) == ("k", 0.5)
+    cfg.save()
+    assert "feeding_min_deaths" not in json.loads(p.read_text(encoding="utf-8"))  # 舊欄位直接捨棄

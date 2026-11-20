@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import autostart, single
-from .analysis import (FeedingThresholds, GameSummary, Mastery, PremadeGroup, detect_premades, game_summaries,
+from .analysis import (GameSummary, Mastery, PremadeGroup, detect_premades, game_summaries,
                        split_game, streak)
 from .audit import ME, Audit, AuditOutcome, Me, PlayerResult
 from .champions import Champions, Icon, download_asset, download_icon, icon_dir, icon_path
@@ -508,7 +508,7 @@ class PlayerCard(QFrame):
             rows.append(f"<tr><td colspan='2'>{grey('重開局（不計入統計）')}</td></tr>")
         if g.feeding:
             rows.append(f"<tr><td colspan='2' style='color:{NEON};padding-top:4px'>"
-                        f"送頭場：死亡 {g.deaths} · KDA {g.kda:.2f} · KD {g.kd:.2f}</td></tr>")
+                        f"送頭場：死亡 {g.deaths} · 每分鐘死亡 {g.death_rate:.2f}</td></tr>")
         return f"<table cellspacing='0' cellpadding='2'>{''.join(rows)}</table>"
 
     def set_champion(self, key: int | None, m: Mastery | None = None, *, loaded: bool = False):
@@ -582,18 +582,14 @@ class SettingsPage(QWidget):
             self.boot.setEnabled(False); self.boot.setToolTip("只有打包後的 exe 能用")
         f.addRow("開機時啟動", self.boot)
 
-        # 送頭場判定：(KDA < 或 KD ≤) 且 死亡 ≥；改了立即存檔並重畫卡片，不重新稽查
+        # 送頭場判定：死亡速率（死亡數 ÷ 整局分鐘）≥ 門檻；改了立即存檔並重畫卡片，不重新稽查
         head = QLabel("<b>送頭場判定</b>"); head.setStyleSheet("padding-top:10px;"); f.addRow(head)
-        self.feed_kda = QDoubleSpinBox(); self.feed_kda.setRange(0, 20); self.feed_kda.setDecimals(2)
-        self.feed_kda.setSingleStep(0.1); self.feed_kda.setValue(cfg.feeding_kda_below)
-        self.feed_kd = QDoubleSpinBox(); self.feed_kd.setRange(0, 10); self.feed_kd.setDecimals(2)
-        self.feed_kd.setSingleStep(0.05); self.feed_kd.setValue(cfg.feeding_kd_at_most)
-        self.feed_deaths = QSpinBox(); self.feed_deaths.setRange(0, 50); self.feed_deaths.setSuffix(" 次")
-        self.feed_deaths.setValue(cfg.feeding_min_deaths)
-        for label, box in (("KDA <", self.feed_kda), ("KD ≤", self.feed_kd), ("死亡 ≥", self.feed_deaths)):
-            box.setKeyboardTracking(False); box.valueChanged.connect(self.save_feeding)
-            f.addRow(label, box)
-        f.addRow("", QLabel(grey("（KDA &lt; 或 KD ≤）且 死亡 ≥ → 送頭場")))
+        self.feed_rate = QDoubleSpinBox(); self.feed_rate.setRange(0.05, 5); self.feed_rate.setDecimals(2)
+        self.feed_rate.setSingleStep(0.05); self.feed_rate.setSuffix(" 次/分")
+        self.feed_rate.setValue(cfg.feeding_deaths_per_minute)
+        self.feed_rate.setKeyboardTracking(False); self.feed_rate.valueChanged.connect(self.save_feeding)
+        f.addRow("每分鐘死亡 ≥", self.feed_rate)
+        f.addRow("", QLabel(grey("死亡數 ÷ 整局時長（分鐘）≥ 門檻 → 送頭場")))
 
     def save_key(self):
         key = self.key.text().strip()
@@ -641,8 +637,7 @@ class SettingsPage(QWidget):
 
     def save_feeding(self):
         cfg = self.win.cfg
-        cfg.feeding_kda_below, cfg.feeding_kd_at_most = self.feed_kda.value(), self.feed_kd.value()
-        cfg.feeding_min_deaths = self.feed_deaths.value()
+        cfg.feeding_deaths_per_minute = self.feed_rate.value()
         cfg.save()
         self.win.refresh_cards()  # 用記憶體裡的對戰重算，不發 Riot API 請求
 
@@ -956,10 +951,9 @@ class MainWindow(QMainWindow):
             else:
                 c.show_champion()
 
-    def feeding(self) -> FeedingThresholds:
-        """設定頁的送頭場門檻。"""
-        c = self.cfg
-        return FeedingThresholds(c.feeding_kda_below, c.feeding_kd_at_most, c.feeding_min_deaths)
+    def feeding(self) -> float:
+        """設定頁的送頭場門檻：每分鐘死亡次數。"""
+        return self.cfg.feeding_deaths_per_minute
 
     def icon_html(self, champion_id: str, size: int) -> str:
         """英雄頭像的 <img>；還沒下載好時是空字串。"""
