@@ -1,4 +1,4 @@
-"""Key 清單：使用者存的多組 Personal API Key，各自的驗證狀態，以及「這次請求要用哪一組」。
+"""Key 清單：使用者存的多組 Personal API Key，各自的驗證狀態。使用中的是哪一組、何時輪替見 rotation.py。
 
 不碰 Qt、不發請求；驗證（打 Riot）與畫面由 gui 負責，這裡只管清單本身，方便測試。
 見 docs/adr/0002-key-pool-rerun-audit-per-key.md。
@@ -66,7 +66,7 @@ class KeyPool:
             entry.status = status
 
     def first_usable(self) -> ApiKey | None:
-        """這次請求要用的 Key：清單中第一組可用的；都不能用時回 None。"""
+        """清單中第一組可用的 Key；都不能用時回 None（使用中的 Key 由 rotation.KeyRotation 決定）。"""
         return next((k for k in self._entries if k.usable), None)
 
     @property

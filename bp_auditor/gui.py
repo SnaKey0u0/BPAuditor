@@ -18,14 +18,15 @@ from PySide6.QtWidgets import (
 )
 
 from . import autostart, puuids, single
-from .analysis import (GameSummary, Mastery, PremadeGroup, detect_premades, game_summaries,
+from .analysis import (GameSummary, Mastery, PremadeGroup, detect_premades, game_puuids, game_summaries,
                        split_game, streak)
 from .audit import ME, Audit, AuditOutcome, Me, PlayerResult
 from .champions import Champions, Icon, download_asset, download_icon, icon_dir, icon_path
 from .config import Config
-from .keys import BAD, CHECKING, OK, WARMING, mask
+from .keys import BAD, OK, WARMING, mask
 from .parsing import RiotId, members_to_query, parse_room_messages, room_change, room_members_in_clipboard
-from .riot import KEY_PAGE, RateLimiter, RiotClient, RiotError, find_api_key
+from .riot import KEY_PAGE, RiotClient, RiotError, find_api_key
+from .rotation import KeyRotation, key_row_status, run_rotating
 
 GROUP_COLORS = ["#ffb300", "#ab47bc", "#29b6f6", "#ef6c00"]
 RED, GREEN, GREY, BLUE, ORANGE = "#ef5350", "#66bb6a", "#9e9e9e", "#90caf9", "#ffb300"
@@ -124,6 +125,9 @@ class Bridge(QObject):
     icon_ready = Signal()
     game = Signal(object, str, bool, str)  # (進行中對局或 None, 錯誤訊息, 是否手動, 查詢所用的 Key)
     mastery = Signal(str, object)  # (標籤, Mastery 或 None)
+    restart = Signal(str, int)  # (新 Key, 要查的人數)：換 Key 了，整次稽查從頭重跑，舊結果丟掉（ADR 0002）
+    key_failed = Signal(str)  # 稽查中回 401/403 的 Key（已標成不可用），換下一組重跑
+    audit_error = Signal(str)  # 稽查沒辦法開始（例如沒有可用的 Key）
 
 
 class Switch(QAbstractButton):
@@ -427,6 +431,18 @@ class PlayerCard(QFrame):
             w.setFixedSize(*size); w.setStyleSheet(f"background:{SKELETON};border-radius:4px;")
         self.tiles.set_games(None)
 
+    def reset(self):
+        """換 Key 重跑：舊 Key 查到的結果全部清掉，回到查詢中（ADR 0002）。"""
+        self.result, self.puuid, self.puuid_key = None, "", ""
+        self.mastery, self.mastery_loaded = None, False
+        self.big.setText(""); self.big.setToolTip(""); self.kda.setText(""); self.rank.setText("")
+        for w in (self.streak, self.feed_tag, self.chip):
+            w.hide()
+        self.set_title("")
+        self.set_skeleton()
+        self.show_champion()
+        self.show_blacklist()
+
     def clear_skeleton(self):
         for w in (self.big, self.kda):
             w.setMinimumSize(0, 0); w.setMaximumSize(16777215, 16777215); w.setStyleSheet("background:transparent;")
@@ -537,12 +553,15 @@ class PlayerCard(QFrame):
         self.champ.setText(f"{head}　{body}"); self.champ.show()
 
 
-def key_status_html(status: str) -> str:
-    """設定頁 Key 清單每一列的狀態。"""
-    return {CHECKING: grey("驗證中…"),
-            WARMING: f"<span style='color:{BLUE}'>新 Key 生效中…</span>",
-            OK: f"<span style='color:{GREEN}'>✓ 可用</span>",
-            BAD: f"<span style='color:{RED}'>失效，請重新產生</span>"}[status]
+ROW_COLORS = {"active": GREEN, "ok": GREEN, "cooling": ORANGE, "busy": BLUE, "error": RED}
+
+
+def key_row_html(text: str, tone: str) -> str:
+    """設定頁 Key 清單每一列的狀態（文字與色調見 rotation.key_row_status）。"""
+    if tone == "grey":
+        return grey(text)
+    weight = "font-weight:bold;" if tone == "active" else ""
+    return f"<span style='color:{ROW_COLORS[tone]};{weight}'>{text}</span>"
 
 
 class KeyList(QWidget):
@@ -581,13 +600,24 @@ class KeyList(QWidget):
             w = self.grid.takeAt(0).widget()
             if w:
                 w.setParent(None); w.deleteLater()
-        active = self.win.cfg.api_keys.first_usable()
+        self.rows: list[tuple[str, QLabel, QLabel]] = []  # (Key, #序號, 狀態)：每秒更新使用中與冷卻倒數
         for i, k in enumerate(self.win.cfg.api_keys):
-            num = QLabel(f"<b>#{i + 1}</b>" if k is active else grey(f"#{i + 1}"))
+            num, status = QLabel(), QLabel()
             rm = QPushButton("✕"); rm.setObjectName("icon"); rm.setToolTip("刪除這組 Key")
             rm.clicked.connect(lambda _=False, key=k.key: self.win.remove_key(key))
-            for col, w in enumerate((num, QLabel(mask(k.key)), QLabel(key_status_html(k.status)), rm)):
+            for col, w in enumerate((num, QLabel(mask(k.key)), status, rm)):
                 self.grid.addWidget(w, i, col)
+            self.rows.append((k.key, num, status))
+        self.tick()
+
+    def tick(self):
+        """只換文字、不重建列：倒數每秒跑一次，滑鼠停在 ✕ 上也不會閃。"""
+        active, pool, rot = self.win.active_key(), self.win.cfg.api_keys, self.win.rotation
+        for i, (key, num, status) in enumerate(getattr(self, "rows", [])):
+            if not (entry := pool.get(key)):
+                continue
+            num.setText(f"<b>#{i + 1}</b>" if key == active else grey(f"#{i + 1}"))
+            status.setText(key_row_html(*key_row_status(entry, key == active, rot.cooldown(key))))
 
 
 class SettingsPage(QWidget):
@@ -689,7 +719,8 @@ class MainWindow(QMainWindow):
         self.resize(880, 600)  # 房間畫面一列放得下 10 個英雄頭像方塊
         self.cfg = Config.load()
         self.champions = Champions()
-        self.limiter = RateLimiter()  # 全程共用，跨次稽查也遵守 Key 限速
+        # 每組 Key 各自的限速（跨次稽查也遵守）與使用中的 Key；冷卻時輪替到下一組（#11）
+        self.rotation = KeyRotation(lambda: self.cfg.api_keys)
         self.cards: dict[str, PlayerCard] = {}
         self.room: list[RiotId] = []
         self.histories: dict = {}
@@ -701,6 +732,7 @@ class MainWindow(QMainWindow):
         self.waiting_key = False
         self.audit_key = ""  # 上一次稽查用的 Key；Key 有問題時知道是哪一組
         self.me_note = ""
+        self.switch_note = ""  # 稽查中換了 Key、從頭重查時顯示在狀態列
         self.quitting = False
         self.view = "room"  # "room"：房間成員單欄；"game"：遊戲中左右兩隊
         self.game_id = None  # 已經查過的對局，避免重複查
@@ -716,6 +748,8 @@ class MainWindow(QMainWindow):
         b.versions.connect(self.cfg.add_versions)
         b.icon_ready.connect(self.refresh_cards)
         b.game.connect(self.on_game); b.mastery.connect(self.on_mastery)
+        b.restart.connect(self.on_restart); b.key_failed.connect(self.on_key_failed)
+        b.audit_error.connect(self.on_audit_error)
 
         root = QWidget(); self.setCentralWidget(root)
         h = QHBoxLayout(root)
@@ -733,6 +767,8 @@ class MainWindow(QMainWindow):
         self.poll_timer = QTimer(self); self.poll_timer.timeout.connect(self.poll_game)
         self.poll_tick = QTimer(self); self.poll_tick.timeout.connect(self.update_poll_bar)
         self.poll_until = 0.0
+        self.key_tick = QTimer(self); self.key_tick.timeout.connect(self.tick_keys)
+        self.key_tick.start(1000)  # 設定頁的「使用中」與冷卻倒數
         self.update_key_status()
         if self.cfg.autostart:
             autostart.apply(True)  # exe 搬過位置時更新路徑
@@ -840,12 +876,16 @@ class MainWindow(QMainWindow):
 
     # ─── API Key ───
     def active_key(self) -> str:
-        """這次請求要用的 Key：清單中第一組可用的（還不輪替）；沒有時是空字串。"""
-        k = self.cfg.api_keys.first_usable()
-        return k.key if k else ""
+        """使用中的 Key：一直用同一組，冷卻了才依序換下一組（rotation.KeyRotation）；沒有可用的時是空字串。"""
+        return self.rotation.current()
 
     def client_for(self, key: str) -> RiotClient:
-        return RiotClient(key, self.limiter)
+        """指定 Key 的客戶端（遵守它自己的限速，冷卻就等）：補查本人、換算黑名單等只能用這組 Key 的請求。"""
+        return self.rotation.client(key)
+
+    def tick_keys(self):
+        if self.right.currentIndex() == 1:
+            self.settings.keys.tick()
 
     def usable_keys(self, but: str = "") -> list[str]:
         return [k.key for k in self.cfg.api_keys if k.usable and k.key != but]
@@ -897,7 +937,7 @@ class MainWindow(QMainWindow):
     def check_key(self, key: str):
         def check():
             try:
-                RiotClient(key, self.limiter).check_key(); self.bridge.key_checked.emit(key, "", "")
+                self.client_for(key).check_key(); self.bridge.key_checked.emit(key, "", "")
             except RiotError as e:
                 self.bridge.key_checked.emit(key, e.kind, str(e))
         threading.Thread(target=check, daemon=True).start()
@@ -1204,17 +1244,79 @@ class MainWindow(QMainWindow):
         self.status.setText("有人離開，已移除")
 
     def _run_audit(self, query: list[RiotId], key: str = "", **game):
+        """在背景跑一次稽查。key：指定要用的 Key（查對面時是查到對局的那組）；空字串用使用中的 Key。
+        途中 Key 冷卻或失效而換 Key 時，整次稽查用新 Key 從頭重跑（rotation.run_rotating、ADR 0002）。"""
         self.running, self.done_count, self.total, self.t0 = True, 0, len(query), time.monotonic()
-        self.me_note = ""
+        self.me_note = self.switch_note = ""
         self.audit_btn.setEnabled(False)
         self.update_progress()
         self.progress_timer.start(500)
         b = self.bridge
-        key = self.audit_key = key or self.active_key()  # 一次稽查的所有資料都出自同一組 Key（ADR 0002）
-        audit = Audit(self.client_for(key), self.room, self.me(key), self.cfg.recent_games, query=query,
-                      prior=self.histories, on_player=lambda r: b.player.emit(r, key), on_me=lambda m: b.me.emit(m, key),
-                      on_outcome=b.outcome.emit, on_done=b.done.emit, on_mastery=b.mastery.emit, **game)
-        threading.Thread(target=audit.run, daemon=True).start()
+        if key:
+            self.rotation.set_current(key)
+        first = self.audit_key = key or self.active_key()  # 一次稽查的所有資料都出自同一組 Key（ADR 0002）
+        room, prior, games = list(self.room), self.histories, self.cfg.recent_games
+        everyone = [m for m in room if not m.hidden]
+        tries: list[str] = []
+
+        def job(k: str, client: RiotClient):
+            as_given = not tries and k == first
+            tries.append(k)
+            kw = dict(game)
+            if not as_given:  # 換 Key 了：舊 Key 查到的都不要，房間（或對局）裡每個人都用新 Key 重查
+                b.restart.emit(k, len(everyone))
+                if "puuids" in kw:  # 查對面：觀戰資料的 PUUID 是舊 Key 的版本，用新 Key 重查一次對局
+                    kw["puuids"] = self._game_puuids(k, client, room)
+            Audit(client, room, self.me(k), games, query=query if as_given else everyone,
+                  prior=prior if as_given else {}, on_player=lambda r: b.player.emit(r, k),
+                  on_me=lambda m: b.me.emit(m, k), on_outcome=b.outcome.emit, on_mastery=b.mastery.emit,
+                  **kw).execute()
+
+        def run():
+            try:
+                run_rotating(self.rotation, job, on_key_error=self._key_failed_in_audit)
+            except RiotError as e:
+                b.audit_error.emit(str(e))
+            finally:
+                b.done.emit()
+        threading.Thread(target=run, daemon=True).start()
+
+    def _game_puuids(self, key: str, client: RiotClient, room: list[RiotId]) -> dict[str, str]:
+        """（背景執行緒）用 key 重查一次進行中的對局，取得 room 每個人在這組 Key 的 PUUID；
+        查不到的人由稽查改用 Riot ID 查帳號。"""
+        me = self.cfg.my_puuid(key)
+        try:
+            return game_puuids(client.active_game(me) if me else None, room)
+        except RiotError:
+            return {}
+
+    def _key_failed_in_audit(self, key: str):
+        """（背景執行緒）稽查中回 401/403：馬上標成不可用，輪替才會跳過它；剛產生的 Key 當作還沒生效。"""
+        self.cfg.api_keys.set_status(key, WARMING if self.key_is_fresh(key) else BAD)
+        self.bridge.key_failed.emit(key)
+
+    def on_key_failed(self, key: str):
+        entry = self.cfg.api_keys.get(key)
+        if entry and entry.status == WARMING:
+            self.warm_up_key(key)  # 15 秒後重驗
+        else:
+            self.on_keys_changed()
+
+    def on_restart(self, key: str, total: int):
+        """換 Key 了：整次稽查用新 Key 從頭重跑，畫面上舊 Key 查到的結果全部清掉（ADR 0002）。"""
+        self.audit_key, self.done_count, self.total = key, 0, total
+        n = next((i + 1 for i, k in enumerate(self.cfg.api_keys) if k.key == key), "?")
+        self.switch_note = f"換用 Key #{n}，從頭重查"
+        for m in self.room:
+            if not m.hidden and (c := self.cards.get(key_of(m))):
+                c.reset()
+        self._clear_banner()
+        self.update_progress()
+        self.update_key_status()
+
+    def on_audit_error(self, error: str):
+        self.me_note = error  # 稽查結束時顯示在狀態列
+        self.update_key_status()
 
     def on_player(self, r: PlayerResult, key: str):
         k = key_of(r.riot_id)
@@ -1264,13 +1366,15 @@ class MainWindow(QMainWindow):
     def update_progress(self):
         """查詢進度；被 Riot 限流時顯示倒數，免得看起來像當掉。"""
         text = f"查詢中 {self.done_count}/{self.total}"
-        wait = self.limiter.wait_remaining()
+        wait = self.rotation.limiter(self.audit_key).wait_remaining() if self.audit_key else 0
+        if self.switch_note:
+            text += f"\n{self.switch_note}"
         if wait >= 1:
             text += f"\n請求太多，Riot 要求等 {wait:.0f} 秒"
         self.status.setText(text)
 
     def on_done(self):
-        self.running = False
+        self.running, self.switch_note = False, ""
         self.progress_timer.stop()
         self.audit_btn.setEnabled(True)
         msg = f"完成，用時 {time.monotonic() - self.t0:.1f} 秒"
@@ -1324,9 +1428,15 @@ class MainWindow(QMainWindow):
             self.poll_timer.stop()  # 手動查過就不再自動查
             self.status.setText("查詢對局中…")
 
+        def job(k: str, client: RiotClient):  # 冷卻或失效時換 Key 重查；觀戰資料的 PUUID 是查詢所用那組 Key 的版本
+            if not (me := self.cfg.my_puuid(k)):
+                raise RiotError("not_found", "還沒查到你在這組 Key 的 PUUID，請確認設定裡你的 Riot ID")
+            return client.active_game(me), k
+
         def run():
             try:
-                self.bridge.game.emit(self.client_for(key).active_game(puuid), "", manual, key)
+                game, k = run_rotating(self.rotation, job, on_key_error=self._key_failed_in_audit)
+                self.bridge.game.emit(game, "", manual, k)
             except RiotError as e:
                 self.bridge.game.emit(None, str(e), manual, key)
         threading.Thread(target=run, daemon=True).start()

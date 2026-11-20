@@ -15,7 +15,7 @@
 設定存在 `%APPDATA%\BPAuditor\config.json`，英雄頭像存在同目錄的 `icons\`。**程式不內建任何 API Key**。
 
 ### Key 清單
-設定頁可以存好幾組 Personal API Key（#1、#2…），每列顯示遮罩過的 Key 與狀態（驗證中／新 Key 生效中／✓ 可用／失效），按 ✕ 刪除。所有請求一律用清單中**第一組可用的 Key**。新增 Key：在輸入框貼上後按 Enter，或按「取得新 Key」開啟 developer.riotgames.com 後複製——程式隨時監看剪貼簿，抓到新 Key 就會加入清單並驗證（不會取代原本的 Key）。回 401/403 的 Key 標成「失效，請重新產生」，不會自動刪除；全部失效時畫面上方會顯示提示。
+設定頁可以存好幾組 Personal API Key（#1、#2…），每列顯示遮罩過的 Key 與狀態（驗證中／新 Key 生效中／✓ 可用／✓ 使用中／冷卻 N 秒／失效），按 ✕ 刪除。每組 Key 各有自己的限速；程式一直用同一組 Key，直到它**冷卻**（本地限速或 Riot 回 429 要等 2 秒以上）才依序換下一組可用的 Key。稽查到一半換 Key 時，整次稽查用新 Key **從頭重跑**（PUUID 依 Key 加密，見 `docs/adr/0002-key-pool-rerun-audit-per-key.md`）；全部冷卻時等最早解除的那一組，只有一組 Key 時冷卻就等。新增 Key：在輸入框貼上後按 Enter，或按「取得新 Key」開啟 developer.riotgames.com 後複製——程式隨時監看剪貼簿，抓到新 Key 就會加入清單並驗證（不會取代原本的 Key）。回 401/403 的 Key 標成「失效，請重新產生」，不會自動刪除；全部失效時畫面上方會顯示提示。
 
 > Riot 沒有提供換 Key 的 API，而自動登入網站需要你的帳密並繞過人機驗證、違反開發者條款，所以這一步刻意保留為手動按一下。
 
@@ -34,7 +34,8 @@ build.bat                                 # 打包到 dist\，可直接雙擊（
 |---|---|
 | `parsing.py` | 房間訊息 → Riot ID 清單；房間名單變化（不變/多人/少人/換人） |
 | `riot.py` | Riot API 客戶端 + Key 限速（20/秒、100/2 分） |
-| `keys.py` | Key 清單：多組 Personal Key 的新增／刪除、驗證狀態、選出第一組可用的 Key |
+| `keys.py` | Key 清單：多組 Personal Key 的新增／刪除、驗證狀態 |
+| `rotation.py` | Key 輪替：每組 Key 各自的限速、冷卻時換下一組、換 Key 時整次稽查重跑 |
 | `analysis.py` | 純函式：近期戰績、牌位、英雄熟練度、可能多排、相遇、拆開進行中對局的兩隊 |
 | `audit.py` | 一次稽查的並行流程，查完一人回報一人；偵測本人改名 |
 | `champions.py` | Data Dragon 英雄繁中名稱與頭像 |

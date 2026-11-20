@@ -121,10 +121,16 @@ class Audit:
     def run(self):
         """阻塞執行；請在背景執行緒呼叫。"""
         try:
+            self.execute()
+        finally:
+            self.on_done()
+
+    def execute(self):
+        """同 run，但不呼叫 on_done：換 Key 時（KeySwitch，見 rotation.run_rotating）整次稽查會用新 Key 重跑。"""
+        try:
             self._run()
         finally:
             self._match_pool.shutdown(wait=False)
-            self.on_done()
 
     def _run(self):
         has_me = bool(self.me.puuid or self.me.riot_id)

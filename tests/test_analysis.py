@@ -1,5 +1,5 @@
 from bp_auditor.analysis import (STREAK_MIN, detect_premades, find_encounter, game_summaries,
-                                 mastery, ranks, recent_stats, split_game, streak)
+                                 game_puuids, mastery, ranks, recent_stats, split_game, streak)
 
 
 def match(mid, team100, team200, *, win100=True, champ="Ahri", kda=(2, 1, 3), queue=450, mode="ARAM",
@@ -259,3 +259,15 @@ def test_split_game_keeps_hidden_players_and_skips_bots():
     assert [(p.label, p.puuid, p.champion_key) for p in allies] == [("我#TW2", "me", 103), ("A#1", "a", 1),
                                                                       ("Soraka", "", 16)]
     assert [p.label for p in enemies] == ["X#1"]
+
+
+def test_game_puuids_maps_room_labels_to_this_keys_puuids():
+    """換 Key 重跑查對面：用新 Key 重查一次對局，把房間標籤（沿用房間裡的大小寫）對到新 Key 的 PUUID。"""
+    from bp_auditor.parsing import RiotId
+    game = {"participants": [
+        {"puuid": "k2-me", "teamId": 100, "riotId": "我#TW2"},
+        {"puuid": "k2-a", "teamId": 100, "riotId": "a#1"},
+        {"puuid": None, "teamId": 200, "riotId": "Soraka"}]}
+    room = [RiotId("我", "TW2"), RiotId("A", "1"), RiotId("離開了", "1")]
+    assert game_puuids(game, room) == {"我#TW2": "k2-me", "A#1": "k2-a"}
+    assert game_puuids(None, room) == {}
