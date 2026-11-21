@@ -565,11 +565,27 @@ class KeyList(QWidget):
         for i, k in enumerate(self.win.cfg.api_keys):
             num, status = QLabel(), QLabel()
             rm = QPushButton("✕"); rm.setObjectName("icon"); rm.setToolTip("刪除這組 Key")
-            rm.clicked.connect(lambda _=False, key=k.key: self.win.remove_key(key))
+            rm.clicked.connect(lambda _=False, key=k.key, n=i + 1: self.confirm_remove(key, n))
             for col, w in enumerate((num, QLabel(mask(k.key)), status, rm)):
                 self.grid.addWidget(w, i, col)
             self.rows.append((k.key, num, status))
         self.tick()
+
+    def confirm_remove(self, key: str, n: int):
+        """按 ✕：先確認才刪（#22），誤按不會弄丟 Key。"""
+        if self.ask_remove(key, n):
+            self.win.remove_key(key)
+
+    def ask_remove(self, key: str, n: int) -> bool:
+        box = QMessageBox(QMessageBox.Warning, "刪除 API Key", f"確定刪除 #{n}（{mask(key)}）？", parent=self)
+        box.setWindowIcon(app_icon())
+        yes = box.addButton("刪除", QMessageBox.DestructiveRole)
+        no = box.addButton("取消", QMessageBox.RejectRole)
+        yes.setStyleSheet("QPushButton{background:#c62828;} QPushButton:hover{background:#e53935;}")
+        no.setObjectName("secondary")
+        box.setDefaultButton(no); box.setEscapeButton(no)
+        box.exec()
+        return box.clickedButton() is yes
 
     def tick(self):
         """只換文字、不重建列：倒數每秒跑一次，滑鼠停在 ✕ 上也不會閃。"""
