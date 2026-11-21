@@ -4,7 +4,7 @@ import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from .analysis import FEEDING_DEATHS_PER_MINUTE
+from .analysis import FEEDING_DEATHS_PER_MINUTE, POKE_KD_AT_MOST
 from .keys import KeyPool
 from .puuids import Versions
 
@@ -24,6 +24,7 @@ class Config:
     autostart: bool = False
     # 送頭場門檻：死亡速率（單場死亡數 ÷ 整局分鐘）≥ 此值；舊版的 KDA／KD／死亡次數三個欄位載入時直接捨棄
     feeding_deaths_per_minute: float = FEEDING_DEATHS_PER_MINUTE
+    poke_kd_at_most: float = POKE_KD_AT_MOST  # 戳場門檻：單場 KD ≤ 此值
 
     def my_puuid(self, key: str) -> str:
         """本人在這組 Key 下的 PUUID；還沒查到時是空字串。"""

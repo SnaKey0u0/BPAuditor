@@ -35,5 +35,5 @@ def clock(minutes: float) -> str:
 
 
 def stats_line(g: GameSummary) -> str:
-    """單場提示框的一行：整局時長與死亡速率。每一場都顯示（含重開局），不另外標記送頭場。"""
-    return f"時長 {clock(g.minutes)} · {g.death_rate:.2f} 死/分"
+    """單場提示框的一行：整局時長、死亡速率與 KD。每一場都顯示（含重開局），不另外標記送頭場或戳場。"""
+    return f"時長 {clock(g.minutes)} · {g.death_rate:.2f} 死/分 · KD {g.kd:.2f}"
