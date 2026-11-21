@@ -622,7 +622,10 @@ class SettingsPage(QWidget):
         f.addRow("開機時啟動", self.boot)
 
         # 戳場判定：死亡速率 ≥ 門檻且單場 KDA ≤ 門檻（0 死不算）；改了立即存檔並重畫卡片，不重新稽查
-        head = QLabel("<b>戳場</b>"); head.setStyleSheet("padding-top:10px;"); f.addRow(head)
+        head = QLabel(f"<b style='font-size:15px;color:{NEON}'>戳場</b>&nbsp;&nbsp;"
+                      f"{grey('死亡速率 ≥ 門檻　且　KDA ≤ 門檻')}")
+        head.setStyleSheet("border-top:1px solid #3a3f4b;margin-top:10px;padding-top:10px;")
+        f.addRow(head)
         self.poke_rate = QDoubleSpinBox(); self.poke_rate.setRange(0.05, 5); self.poke_rate.setDecimals(2)
         self.poke_rate.setSingleStep(0.05); self.poke_rate.setPrefix("≥ ")
         self.poke_rate.setValue(cfg.poke_deaths_per_minute)
