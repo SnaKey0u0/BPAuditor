@@ -18,8 +18,8 @@ from PySide6.QtWidgets import (
     QSpacerItem, QStackedWidget, QSystemTrayIcon, QToolTip, QVBoxLayout, QWidget,
 )
 
-from . import autostart, key_manager as km, scheduler as sch, single, tiles
-from .analysis import GameSummary, Mastery, PremadeGroup, game_summaries, streak
+from . import autostart, card_view as cv, key_manager as km, scheduler as sch, single
+from .analysis import GameSummary, Mastery, PremadeGroup
 from .audit import ME, AuditOutcome, Me, PlayerResult
 from .champions import Champions, Icon, download_asset, download_icon, icon_dir, icon_path
 from .config import Config
@@ -34,8 +34,8 @@ RED, GREEN, GREY, BLUE, ORANGE = "#ef5350", "#66bb6a", "#9e9e9e", "#90caf9", "#f
 SKELETON = "#323844"
 NEON = "#18ffff"  # 戳場的霓虹光暈與標籤
 GAME_WIDTH = 1100  # 左右兩隊時視窗至少這麼寬
-KDA_GOOD, KD_GOOD = 3, 1  # 平均 KDA／KD 達到這個值顯示綠色，否則紅色
-ERROR_SHORT = {"not_found": "查無此人", "network": "連線失敗", "server": "伺服器錯誤", "blocked": "連線被擋"}
+TONES = {cv.GOOD: GREEN, cv.BAD: RED, cv.NEUTRAL: "#e0e0e0", cv.MUTED: GREY}  # 顯示模型的色調 → 字色
+TAG_BG = {cv.GOOD: "#2e4a3a", cv.BAD: "#4a2e2e"}  # 連勝／連敗、相遇標籤的底色
 
 QSS = """
 QWidget{background:#1b1e24;color:#e0e0e0;font-family:'Microsoft JhengHei UI','Segoe UI';font-size:13px;}
@@ -60,12 +60,12 @@ QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:none;}
 """
 
 
-def wr_color(rate: float) -> str:
-    return RED if rate < 0.4 else GREEN if rate > 0.6 else "#e0e0e0"
+def toned(text: str, tone: str) -> str:
+    return f"<span style='color:{TONES[tone]}'>{text}</span>"
 
 
 def grey(text: str) -> str:
-    return f"<span style='color:{GREY}'>{text}</span>"
+    return toned(text, cv.MUTED)
 
 
 def keep_together(html: str) -> str:
@@ -77,13 +77,11 @@ def keep_together(html: str) -> str:
                    for p in parts if p)
 
 
-def kda_html(kda: float, kd: float) -> str:
-    """平均 KDA < 3、KD < 1 紅色，否則綠色；兩者同字體大小，上下兩行，標籤與數值各自對齊成一欄。"""
-    def row(label: str, value: float, good: float) -> str:
-        return (f"<tr><td>{grey(label + ':')}</td>"
-                f"<td style='padding-left:6px'><b style='color:{GREEN if value >= good else RED}'>{value:.2f}</b></td></tr>")
-    return (f"<table cellspacing=0 cellpadding=0 style='font-size:15px'>"
-            f"{row('KDA', kda, KDA_GOOD)}{row('KD', kd, KD_GOOD)}</table>")
+def ratios_html(ratios: tuple[cv.Ratio, ...]) -> str:
+    """平均 KDA、KD：同字體大小，上下兩行，標籤與數值各自對齊成一欄。"""
+    rows = "".join(f"<tr><td>{grey(r.label + ':')}</td>"
+                   f"<td style='padding-left:6px'><b style='color:{TONES[r.tone]}'>{r.value}</b></td></tr>" for r in ratios)
+    return f"<table cellspacing=0 cellpadding=0 style='font-size:15px'>{rows}</table>"
 
 
 def resource(name: str) -> Path:
@@ -100,19 +98,6 @@ def app_icon() -> QIcon:
 def opgg_profile(m: RiotId) -> str:
     q = lambda t: urllib.parse.quote(t, safe="")
     return f"https://op.gg/lol/summoners/tw/{q(m.name)}-{q(m.tag)}"
-
-
-def ago(epoch: float) -> str:
-    secs = time.time() - epoch
-    if secs < 3600:
-        return "剛剛"
-    if secs < 86400:
-        return f"{secs / 3600:.0f} 小時前"
-    return f"{secs / 86400:.0f} 天前"
-
-
-def points(n: int) -> str:
-    return f"{n / 10000:.1f} 萬點" if n >= 10000 else f"{n} 點"
 
 
 class Bridge(QObject):
@@ -183,7 +168,7 @@ class FlagButton(QAbstractButton):
 class ChampionTiles(QWidget):
     """近期戰績的英雄頭像方塊：由新到舊，底部綠／紅條表示該場勝敗；每場有各自的提示框。
 
-    5 場一組、組間留較大的間隔，寬度不夠就整組換列（排法見 tiles.grid）；方塊列不會把卡片撐寬。
+    5 場一組、組間留較大的間隔，寬度不夠就整組換列（排法見 card_view.grid）；方塊列不會把卡片撐寬。
     四周留 MARGIN 邊距，戳場的光暈畫在這裡。
     """
     MARGIN = 6
@@ -218,8 +203,8 @@ class ChampionTiles(QWidget):
 
     def _cells(self, width: int) -> list[tuple[int, int]]:
         """給定寬度下每個方塊的左上角；組間間隔取方塊邊長的一半。"""
-        return tiles.grid(self._count(), width, tile=self.tile, gap=self._gap(),
-                          group_gap=self.tile // 2, margin=self.MARGIN)
+        return cv.grid(self._count(), width, tile=self.tile, gap=self._gap(),
+                       group_gap=self.tile // 2, margin=self.MARGIN)
 
     def _bounds(self, cells: list[tuple[int, int]]) -> QSize:
         """排好的方塊所佔的大小，含邊距。"""
@@ -473,84 +458,62 @@ class PlayerCard(QFrame):
             self.mastery, self.mastery_loaded = r.mastery, True
         self.result = r
         self.clear_skeleton()
-        self.tiles.set_games([])
-        self.streak.hide()
-        self.poke_tag.hide()
         self.show_champion()
         self.puuid = "" if r.error else (r.puuid or "")
         self.show_blacklist()
-        if r.error:
-            if r.error.kind == "key":
-                self.big.setText(grey("—")); self.big.setToolTip("")
-            else:
-                self.big.setText(f"<span style='color:{RED}'>{ERROR_SHORT.get(r.error.kind, '查詢失敗')}</span>")
-                self.big.setToolTip(str(r.error))
-            self.kda.setText("")
-            return
-        self.big.setToolTip("")
-        s = r.stats
-        self.set_title(grey(f"Lv&nbsp;{s.level if s.level is not None else '?'}"))
-        self.show_ranks(r.ranks)
-        if s.games:
-            self.big.setText(f"<b style='font-size:24px;color:{wr_color(s.win_rate)}'>{round(s.win_rate * 100)}%</b>"
-                             f"<br>{grey(f'{s.wins}勝{s.games - s.wins}敗')}")
-            self.kda.setText(kda_html(s.kda, s.kd))
-        else:
-            self.big.setText(grey("近期沒有對戰")); self.kda.setText("")
-        rate, kda = self.win.poke_thresholds()
-        games = game_summaries(r.puuid, r.matches, rate, kda)
-        self.tiles.set_games(games)  # 全是重開局時統計為空，方塊仍列出
-        self.poke_tag.setVisible(any(x.poke for x in games))
-        self.poke_tag.setToolTip(f"每分鐘死亡 ≥ {rate:.2f} 次，且 KDA ≤ {kda:.2f}")
-        self.win.prefetch_tip_icons(games)
-        if st := streak(games):
-            color, bg = (GREEN, "#2e4a3a") if st.win else (RED, "#4a2e2e")
-            self.streak.setText(f"{'連勝中' if st.win else '連敗中'}({st.games})")
-            self.streak.setStyleSheet(f"background:{bg};color:{color};border-radius:10px;padding:2px 8px;")
-            self.streak.show()
-        e = r.encounter
-        if e:
-            when = "上一場" if e.games_ago == 0 else f"{e.games_ago + 1} 場前"
-            side = "隊友" if e.ally else "敵人"
-            self.chip.setText(f"{self.win.icon_html(e.champion_id, 16)} {when}的{side} · "
-                              f"{self.win.champions.name(e.champion_id)} {e.kills}/{e.deaths}/{e.assists}")
-            self.chip.setStyleSheet(f"background:{'#2e4a3a' if e.ally else '#4a2e2e'};border-radius:10px;padding:2px 8px;")
-            self.chip.show()
+        self.show_view(cv.card_view(r, self.win.champions, *self.win.poke_thresholds()))
 
-    def show_ranks(self, ranks):
-        if ranks is None:
-            self.rank_html, self.rank_tip = keep_together(grey("牌位查不到")), ""
-            self._render_title(); return
-        parts, tips = [], []
-        for q in ("單雙", "彈性"):
-            r = ranks.get(q)
-            parts.append(keep_together(f"{grey(q)} {r if r else grey('未定級')}"))  # 一個佇列一段，段間才換行
-            if r:
-                games = r.wins + r.losses
-                tips.append(f"{q} {r.wins}勝{r.losses}敗" + (f"（{round(r.wins / games * 100)}%）" if games else ""))
-        self.rank_html, self.rank_tip = " · ".join(parts), "\n".join(tips)
-        self._render_title()
+    def show_view(self, view: cv.CardView):
+        """把顯示模型套到 widget：色調換成顏色、文案排成 rich text。"""
+        rank = view.rank
+        if rank is None:
+            self.rank_html, self.rank_tip = "", ""
+        elif not rank.queues:
+            self.rank_html, self.rank_tip = keep_together(grey(rank.note)), rank.tip
+        else:  # 一個佇列一段，段間才換行
+            self.rank_html = " · ".join(keep_together(f"{grey(q.queue)} {q.text if q.ranked else grey(q.text)}")
+                                        for q in rank.queues)
+            self.rank_tip = rank.tip
+        self.set_title(grey(view.level.replace(" ", "&nbsp;")) if view.level else "")
+        h = view.headline
+        if h.record:  # 勝率大字，下面是勝敗場數
+            self.big.setText(f"<b style='font-size:24px;color:{TONES[h.tone]}'>{h.text}</b><br>{grey(h.record)}")
+        else:
+            self.big.setText(toned(h.text, h.tone))
+        self.big.setToolTip(h.tip)
+        self.kda.setText(ratios_html(view.ratios) if view.ratios else "")
+        self.tiles.set_games(view.games)
+        self.win.prefetch_tip_icons(view.games)
+        if st := view.streak:
+            self.streak.setText(st.text)
+            self.streak.setStyleSheet(f"background:{TAG_BG[st.tone]};color:{TONES[st.tone]};"
+                                      "border-radius:10px;padding:2px 8px;")
+        self.streak.setVisible(bool(st))
+        if view.poke:
+            self.poke_tag.setText(view.poke.text); self.poke_tag.setToolTip(view.poke.tip)
+        self.poke_tag.setVisible(bool(view.poke))
+        if e := view.encounter:
+            self.chip.setText(f"{self.win.icon_html(e.champion, 16)} {e.text}")
+            self.chip.setStyleSheet(f"background:{TAG_BG[e.tone]};border-radius:10px;padding:2px 8px;")
+        self.chip.setVisible(bool(e))
 
     def _tile_tip(self, g: GameSummary) -> str:
-        """單場提示框：英雄頭像、K/D/A 與勝敗、英雄與模式、裝備列、主符文與召喚師技能列、時長與死亡速率；
-        圖示缺少時以文字替代。rows 是表格的列，重開局的說明接在最後。戳場不另外寫，方塊的光暈已經標示。"""
-        w, c = self.win, self.win.champions
-        result = f"<span style='color:{GREEN if g.win else RED}'>{'勝' if g.win else '敗'}</span>"
-        head = w.icon_html(g.champion, 44)
+        """單場提示框（欄位見 card_view.GameTip）；圖示缺少時以文字替代。rows 是表格的列，重開局的說明接在最後。"""
+        w, t = self.win, cv.game_tip(g, self.win.champions)
+        head = w.icon_html(t.champion, 44)
         rows = [f"<tr>{f'<td rowspan=2>{head}</td>' if head else ''}"
-                f"<td><b style='font-size:15px'>{g.kills} / {g.deaths} / {g.assists}</b> {result}</td></tr>",
-                f"<tr><td><b>{c.name(g.champion)}</b> {grey(g.mode)}</td></tr>"]
-        if g.items:
+                f"<td><b style='font-size:15px'>{t.score}</b> {toned(t.result, t.result_tone)}</td></tr>",
+                f"<tr><td><b>{t.name}</b> {grey(t.mode)}</td></tr>"]
+        if t.items:
             rows.append(f"<tr><td colspan='2' style='padding-top:4px'>"
-                        f"{'&nbsp;'.join(w.asset_html(c.item(i), 26) for i in g.items)}</td></tr>")
-        rune = c.rune(g.keystone) if g.keystone else None
-        icons = ([w.asset_html(rune, 24, fallback="")] if rune else []) + [w.asset_html(c.spell(s), 22) for s in g.spells]
-        if rune or g.spells:
+                        f"{'&nbsp;'.join(w.asset_html(i, 26) for i in t.items)}</td></tr>")
+        icons = ([w.asset_html(t.rune, 24, fallback="")] if t.rune else []) + [w.asset_html(s, 22) for s in t.spells]
+        if t.rune or t.spells:
             rows.append(f"<tr><td colspan='2'>{'&nbsp;'.join(i for i in icons if i)}"
-                        f"{'&nbsp;' + grey(rune.name) if rune else ''}</td></tr>")
-        rows.append(f"<tr><td colspan='2' style='padding-top:4px'>{grey(tiles.stats_line(g))}</td></tr>")
-        if g.remake:
-            rows.append(f"<tr><td colspan='2'>{grey('重開局（不計入統計）')}</td></tr>")
+                        f"{'&nbsp;' + grey(t.rune.name) if t.rune else ''}</td></tr>")
+        rows.append(f"<tr><td colspan='2' style='padding-top:4px'>{grey(t.stats)}</td></tr>")
+        if t.note:
+            rows.append(f"<tr><td colspan='2'>{grey(t.note)}</td></tr>")
         return f"<table cellspacing='0' cellpadding='2'>{''.join(rows)}</table>"
 
     def set_champion(self, key: int | None, m: Mastery | None = None, *, loaded: bool = False):
@@ -562,17 +525,10 @@ class PlayerCard(QFrame):
         """本場英雄的熟練度（只在遊戲中）。"""
         if self.champion_key is None:
             self.champ.hide(); return
-        cid = self.win.champions.by_key(self.champion_key)
-        head = f"{self.win.icon_html(cid, 18) if cid else ''} {self.win.champions.name(cid) if cid else '本場英雄'}"
-        m = self.mastery
-        if self.hidden:
-            body = ""
-        elif m is not None:
-            body = f"熟練 {m.level} 級 · {points(m.points)} · {grey(ago(m.last_play) + '玩過')}"
-        elif self.mastery_loaded:
-            body = grey("沒玩過（或查不到）")
-        else:
-            body = grey("查詢中…")
+        line = cv.champion_line(self.champion_key, self.mastery, loaded=self.mastery_loaded, hidden=self.hidden,
+                                champions=self.win.champions)
+        head = f"{self.win.icon_html(line.champion, 18) if line.champion else ''} {line.name}"
+        body = " · ".join([*line.facts, grey(line.note)] if line.note else line.facts)
         self.champ.setText(f"{head}　{body}"); self.champ.show()
 
 
