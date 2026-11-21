@@ -96,7 +96,7 @@ class GameSummary:
         return death_rate(self.deaths, self.minutes)
 
 
-FEEDING_DEATHS_PER_MINUTE = 0.5  # 送頭場門檻的預設值：死亡速率 ≥ 每分鐘 0.5 次
+FEEDING_DEATHS_PER_MINUTE = 0.6  # 送頭場門檻的預設值：死亡速率 ≥ 每分鐘 0.6 次
 
 
 def game_minutes(match: dict) -> float:
