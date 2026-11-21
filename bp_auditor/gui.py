@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QSpacerItem, QStackedWidget, QSystemTrayIcon, QToolTip, QVBoxLayout, QWidget,
 )
 
-from . import autostart, puuids, single
+from . import autostart, puuids, single, tiles
 from .analysis import GameSummary, Mastery, PremadeGroup, game_summaries, streak
 from .audit import ME, AuditOutcome, Me, PlayerResult
 from .champions import Champions, Icon, download_asset, download_icon, icon_dir, icon_path
@@ -31,7 +31,7 @@ from .session import GAME, ROOM, AuditSession, Listener, RoomPlan, card_key
 GROUP_COLORS = ["#ffb300", "#ab47bc", "#29b6f6", "#ef6c00"]
 RED, GREEN, GREY, BLUE, ORANGE = "#ef5350", "#66bb6a", "#9e9e9e", "#90caf9", "#ffb300"
 SKELETON = "#323844"
-NEON = "#18ffff"  # 送頭場的霓虹框、提示框說明與標籤
+NEON = "#18ffff"  # 送頭場的霓虹框與標籤
 KEY_RECHECK_MS = 15_000
 GAME_POLL_DELAY_MS = 90_000  # 房間稽查完先等 90 秒（排隊＋選角）才開始問觀戰 API
 GAME_POLL_MS = 20_000  # 之後每 20 秒問一次，看開局了沒
@@ -150,10 +150,9 @@ class Switch(QAbstractButton):
 class ChampionTiles(QWidget):
     """近期戰績的英雄頭像方塊：由新到舊，底部綠／紅條表示該場勝敗；每場有各自的提示框。
 
-    每列最多 PER_ROW 個，超過換列；卡片比較窄時（視窗縮小、對局的兩隊畫面）也會提早換列，
-    方塊列不會把卡片撐寬。四周留 MARGIN 邊距，送頭場的光暈畫在這裡。
+    5 場一組、組間留較大的間隔，寬度不夠就整組換列（排法見 tiles.grid）；方塊列不會把卡片撐寬。
+    四周留 MARGIN 邊距，送頭場的光暈畫在這裡。
     """
-    PER_ROW = 10
     MARGIN = 6
     PLACEHOLDER = 5  # 查詢中顯示幾個灰色佔位方塊
     ROOM, GAME = 32, 24  # 方塊邊長：房間畫面、對局的兩隊畫面
@@ -184,30 +183,30 @@ class ChampionTiles(QWidget):
     def _count(self) -> int:
         return self.PLACEHOLDER if self.games is None else len(self.games)
 
-    def _per_row(self, width: int) -> int:
-        """給定寬度下每列放幾個：最多 PER_ROW 個，至少 1 個。"""
-        step = self.tile + self._gap()
-        fit = (width - 2 * self.MARGIN + self._gap()) // step
-        return max(1, min(self.PER_ROW, self._count(), fit))
+    def _cells(self, width: int) -> list[tuple[int, int]]:
+        """給定寬度下每個方塊的左上角；組間間隔取方塊邊長的一半。"""
+        return tiles.grid(self._count(), width, tile=self.tile, gap=self._gap(),
+                          group_gap=self.tile // 2, margin=self.MARGIN)
 
-    def _extent(self, n: int) -> int:
-        """n 個方塊排成一列（或一欄）的長度，含兩端邊距。"""
-        return n * (self.tile + self._gap()) - self._gap() + 2 * self.MARGIN
+    def _bounds(self, cells: list[tuple[int, int]]) -> QSize:
+        """排好的方塊所佔的大小，含邊距。"""
+        if not cells:
+            return QSize(0, 0)
+        return QSize(max(x for x, _ in cells) + self.tile + self.MARGIN,
+                     max(y for _, y in cells) + self.tile + self.MARGIN)
 
     def sizeHint(self):
-        n = self._count()
-        cols = min(n, self.PER_ROW)
-        return QSize(self._extent(cols), self._extent(math.ceil(n / cols))) if n else QSize(0, 0)
+        return self._bounds(self._cells(1 << 20))  # 寬度不受限時的排法
 
     def minimumSizeHint(self):
-        return QSize(self._extent(1), self._extent(1))
+        side = self.tile + 2 * self.MARGIN
+        return QSize(side, side)
 
     def hasHeightForWidth(self):
         return True
 
     def heightForWidth(self, w: int) -> int:
-        n = self._count()
-        return self._extent(math.ceil(n / self._per_row(w))) if n else 0
+        return self._bounds(self._cells(w)).height()
 
     def _pixmap(self, champion: str, grey: bool = False) -> QPixmap | None:
         """grey=True：去色版本（重開局用），另外快取。"""
@@ -229,11 +228,9 @@ class ChampionTiles(QWidget):
         p = QPainter(self)
         p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         p.setPen(Qt.NoPen)
-        s, gap, radius = self.tile, self._gap(), 4 if self.tile >= 32 else 3
+        s, radius = self.tile, 4 if self.tile >= 32 else 3
         bar = max(s // 7, 3)  # 底部勝敗色條的高度
-        cols = self._per_row(self.width())
-        self.rects = [QRectF(self.MARGIN + i % cols * (s + gap), self.MARGIN + i // cols * (s + gap), s, s)
-                      for i in range(self._count())]
+        self.rects = [QRectF(x, y, s, s) for x, y in self._cells(self.width())]
         feeding = [r for r, g in zip(self.rects, self.games or []) if g.feeding]
         for r in feeding:  # 光暈先畫，相鄰方塊再蓋上去，光暈只留在間隙與邊距裡
             self._glow(p, r, radius)
@@ -436,8 +433,8 @@ class PlayerCard(QFrame):
         self.rank.setText(" · ".join(parts)); self.rank.setToolTip("\n".join(tips))
 
     def _tile_tip(self, g: GameSummary) -> str:
-        """單場提示框：英雄頭像、K/D/A 與勝敗、英雄與模式、裝備列、主符文與召喚師技能列；圖示缺少時以文字替代。
-        rows 是表格的列，單場說明（重開局、送頭場）接在最後。"""
+        """單場提示框：英雄頭像、K/D/A 與勝敗、英雄與模式、裝備列、主符文與召喚師技能列、時長與死亡速率；
+        圖示缺少時以文字替代。rows 是表格的列，重開局的說明接在最後。送頭場不另外寫，方塊的光暈已經標示。"""
         w, c = self.win, self.win.champions
         result = f"<span style='color:{GREEN if g.win else RED}'>{'勝' if g.win else '敗'}</span>"
         head = w.icon_html(g.champion, 44)
@@ -452,11 +449,9 @@ class PlayerCard(QFrame):
         if rune or g.spells:
             rows.append(f"<tr><td colspan='2'>{'&nbsp;'.join(i for i in icons if i)}"
                         f"{'&nbsp;' + grey(rune.name) if rune else ''}</td></tr>")
+        rows.append(f"<tr><td colspan='2' style='padding-top:4px'>{grey(tiles.stats_line(g))}</td></tr>")
         if g.remake:
             rows.append(f"<tr><td colspan='2'>{grey('重開局（不計入統計）')}</td></tr>")
-        if g.feeding:
-            rows.append(f"<tr><td colspan='2' style='color:{NEON};padding-top:4px'>"
-                        f"送頭場：死亡 {g.deaths} · 每分鐘死亡 {g.death_rate:.2f}</td></tr>")
         return f"<table cellspacing='0' cellpadding='2'>{''.join(rows)}</table>"
 
     def set_champion(self, key: int | None, m: Mastery | None = None, *, loaded: bool = False):
