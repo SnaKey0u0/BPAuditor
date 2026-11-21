@@ -1,11 +1,9 @@
 """Key 冷卻自動輪替，換 Key 時整次稽查重跑（#11，ADR 0002）。
 
-全部用假時鐘（FakeClock）與假的 Riot 傳輸層（FakeRiot），不發真的請求、不真的睡。
+全部用假時鐘（FakeClock）與共用的假 Riot（tests.fakes.FakeRiot），不發真的請求、不真的睡。
 FakeRiot 模擬「PUUID 依 Key 加密」：同一個帳號在不同 Key 下拿到不同的 PUUID。
 """
-import json
 import threading
-import urllib.parse
 
 import pytest
 
@@ -14,7 +12,7 @@ from bp_auditor.parsing import RiotId
 from bp_auditor.keys import BAD, CHECKING, OK, UNVERIFIED, WARMING, ApiKey, KeyPool
 from bp_auditor.riot import RateLimiter, RiotError
 from bp_auditor.rotation import KeyRotation, key_row_status, run_rotating
-from tests.test_analysis import match
+from tests.fakes import FakeRiot, key_tag
 
 K1 = "RGAPI-11111111-1111-1111-1111-111111111111"
 K2 = "RGAPI-22222222-2222-2222-2222-222222222222"
@@ -36,50 +34,14 @@ class FakeClock:
             self.now += s; self.slept += s
 
 
-def tag(key: str) -> str:
-    return key[6:8]  # K1 → "11"
-
-
-def puuid(key: str, name: str) -> str:
-    """PUUID 依 Key 加密：同一個帳號在不同 Key 下拿到不同的 PUUID。"""
-    return f"{tag(key)}:{name}"
-
-
-class FakeRiot:
-    """假的 Riot 傳輸層（RiotClient 的 fetch）。A、B 與本人一直同隊（可能多排），C 是對手。
-    trip[key] = (第幾個請求開始, 狀態碼, 標頭, 次數)：模擬 429／401。"""
-
-    def __init__(self):
-        self.calls: list[tuple[str, str]] = []
-        self.trip: dict[str, tuple[int, int, dict, int]] = {}
-        self._lock = threading.Lock()
-
-    def calls_of(self, key: str) -> int:
-        return sum(k == key for k, _ in self.calls)
-
-    def __call__(self, url: str, key: str, timeout: float):
-        with self._lock:
-            self.calls.append((key, url))
-            n = self.calls_of(key)
-            if key in self.trip:
-                start, code, headers, times = self.trip[key]
-                if start <= n < start + times:
-                    return code, headers, b"{}"
-        path = urllib.parse.unquote(urllib.parse.urlparse(url).path)
-        parts = path.strip("/").split("/")
-        if "by-riot-id" in parts:
-            body = {"puuid": puuid(key, parts[-2])}
-        elif "accounts" in parts and "by-puuid" in parts:
-            body = {"gameName": parts[-1].split(":", 1)[1], "tagLine": "1"}
-        elif parts[-1] == "ids":
-            body = [f"m{i}" for i in range(4)]
-        elif "matches" in parts:
-            body = match(parts[-1], [puuid(key, n) for n in "AB"], [puuid(key, "C")])
-        elif "entries" in parts:
-            body = []
-        else:
-            return 404, {}, b"{}"
-        return 200, {}, json.dumps(body).encode()
+def room_world() -> FakeRiot:
+    """A、B 一直同隊（可能多排），C 是對手；共 4 場。"""
+    riot = FakeRiot()
+    for n in "ABC":
+        riot.add_player(n, tag="1")
+    for i in range(4):
+        riot.add_match(f"m{i}", ["A", "B"], ["C"])
+    return riot
 
 
 def test_限速器_額滿時回報要等多久_不會自己睡():
@@ -183,7 +145,7 @@ class Run:
     """跑一次會輪替的房間稽查；記下每次重跑、最後一輪的結果。"""
 
     def __init__(self, pool, *, clock=None, limits=None, riot=None):
-        self.clock, self.riot = clock or FakeClock(), riot or FakeRiot()
+        self.clock, self.riot = clock or FakeClock(), riot or room_world()
         self.rot = KeyRotation(pool, clock=self.clock, sleep=self.clock.sleep, fetch=self.riot, limits=limits)
         self.jobs: list[str] = []
         self.restarts: list[str] = []
@@ -214,11 +176,11 @@ class Run:
 
 def test_目前的Key回429時_換下一組從頭重跑_最終結果的PUUID都出自同一組Key():
     run = Run(pool_of(K1, K2))
-    run.riot.trip[K1] = (3, 429, {"Retry-After": "60"}, 1)
+    run.riot.fail(K1, 429, retry_after=60, start=3)
     assert run() == K2
     assert run.jobs == [K1, K2] and run.restarts == [K2]
     assert {p.error for p in run.players} == {None} and len(run.players) == 3
-    assert {pu.split(":")[0] for pu in run.puuids()} == {tag(K2)}
+    assert {pu.split(":")[0] for pu in run.puuids()} == {key_tag(K2)}
     assert [g.members for g in run.outcome.premades] == [["A#1", "B#1"]]
     assert run.rot.current() == K2  # 之後繼續用 K2，不切回去
     assert run.clock.slept == 0
@@ -232,23 +194,23 @@ def test_本地限速要等超過換Key門檻時_換下一組_不會先等待():
     assert run() == K2
     assert run.restarts == [K2]
     assert run.clock.slept == 0
-    assert {pu.split(":")[0] for pu in run.puuids()} == {tag(K2)}
+    assert {pu.split(":")[0] for pu in run.puuids()} == {key_tag(K2)}
 
 
 def test_稽查中回401的Key標成失效_換下一組重跑():
     pool = pool_of(K1, K2, K3)
     run = Run(pool)
-    run.riot.trip[K1] = (2, 401, {}, 99)
+    run.riot.fail(K1, 401, start=2, times=99)
     assert run() == K2
     assert pool.get(K1).status == BAD
-    assert {pu.split(":")[0] for pu in run.puuids()} == {tag(K2)}
+    assert {pu.split(":")[0] for pu in run.puuids()} == {key_tag(K2)}
 
 
 def test_輪替_依序循環_跳過失效與冷卻中的Key():
     pool = pool_of(K1, K2, K3, K4, bad=[K2])
     run = Run(pool)
     run.rot.limiter(K3).block_for(300)
-    run.riot.trip[K1] = (3, 429, {"Retry-After": "60"}, 1)
+    run.riot.fail(K1, 429, retry_after=60, start=3)
     assert run() == K4  # K2 失效、K3 冷卻中
     assert run.restarts == [K4]
 
@@ -257,11 +219,11 @@ def test_全部冷卻時_等待最早解除的那一組():
     run = Run(pool_of(K1, K2, K3))
     run.rot.limiter(K2).block_for(30)
     run.rot.limiter(K3).block_for(90)
-    run.riot.trip[K1] = (3, 429, {"Retry-After": "60"}, 1)
+    run.riot.fail(K1, 429, retry_after=60, start=3)
     assert run() == K2  # K2 比 K1 的 60 秒早解除
     assert run.restarts == [K2]
     assert 30 <= run.clock.slept < 60
-    assert {pu.split(":")[0] for pu in run.puuids()} == {tag(K2)}
+    assert {pu.split(":")[0] for pu in run.puuids()} == {key_tag(K2)}
 
 
 def test_開始稽查時全部冷卻_直接用最早解除的那一組_不重跑():
@@ -282,7 +244,7 @@ def test_全部失效或沒有Key時_拋出Key錯誤():
 
 def test_只有一組Key時_冷卻就等待_不會重跑():
     run = Run(pool_of(K1))
-    run.riot.trip[K1] = (3, 429, {"Retry-After": "60"}, 1)
+    run.riot.fail(K1, 429, retry_after=60, start=3)
     assert run() == K1
     assert run.jobs == [K1] and run.restarts == []
     assert run.clock.slept >= 60
@@ -291,7 +253,7 @@ def test_只有一組Key時_冷卻就等待_不會重跑():
 
 def test_唯一可用的Key回401時_照舊回報Key錯誤_不重跑():
     run = Run(pool_of(K1, K2, bad=[K2]))
-    run.riot.trip[K1] = (1, 401, {}, 99)
+    run.riot.fail(K1, 401, start=1, times=99)
     run()
     assert run.restarts == []
     assert {p.error.kind for p in run.players} == {"key"}
@@ -302,7 +264,7 @@ def test_一次稽查超過單組Key的額度時_換過每組Key就留下來等_
     key = run()
     assert len(run.restarts) <= 2
     assert {p.error for p in run.players} == {None}
-    assert {pu.split(":")[0] for pu in run.puuids()} == {tag(key)}
+    assert {pu.split(":")[0] for pu in run.puuids()} == {key_tag(key)}
 
 
 def test_設定頁每一列的狀態_使用中與冷卻倒數():

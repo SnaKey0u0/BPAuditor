@@ -1,6 +1,6 @@
 """本人的 PUUID 依 Key 分開存（#10，ADR 0002）。
 
-FakeRiot 模擬「PUUID 依 Key 加密」：同一個帳號在不同 Key 下拿到不同的 PUUID。
+共用的假 Riot（tests.fakes.FakeRiot）模擬「PUUID 依 Key 加密」：同一個帳號在不同 Key 下拿到不同的 PUUID。
 """
 import json
 
@@ -10,8 +10,7 @@ from bp_auditor.audit import Audit, Me
 from bp_auditor.config import Config, config_path
 from bp_auditor.parsing import RiotId
 from bp_auditor.puuids import lookup_me
-from bp_auditor.riot import RiotError
-from tests.test_analysis import match
+from tests.fakes import FakeRiot
 
 K1 = "RGAPI-11111111-1111-1111-1111-111111111111"
 K2 = "RGAPI-22222222-2222-2222-2222-222222222222"
@@ -50,46 +49,14 @@ def test_更舊的單一Key設定檔_本人一樣歸到1號():
     assert cfg.my_puuid(K1) == "me-1"
 
 
-# ─── 假的 Riot：PUUID 依 Key 加密 ───
+# ─── 假的 Riot（tests.fakes）：PUUID 依 Key 加密 ───
 
 
-class FakeRiot:
-    """帳號 → 目前的 Riot ID；某組 Key 下的 PUUID 是「Key 末四碼:帳號」，別組 Key 解不開（Riot 回 400）。"""
-
-    def __init__(self, accounts: dict[str, tuple[str, str]]):
-        self.accounts = dict(accounts)
-        self.down: set[str] = set()  # 這些 Key 的請求都連線失敗
-
-    def puuid(self, key, account):
-        return f"{key[-4:]}:{account}"
-
-    def client(self, key):
-        return FakeClient(self, key)
-
-
-class FakeClient:
-    def __init__(self, riot, key):
-        self.riot, self.key = riot, key
-
-    def _check(self):
-        if self.key in self.riot.down:
-            raise RiotError("network", "連線失敗")
-
-    def riot_id_of(self, puuid):
-        self._check()
-        prefix, _, account = puuid.partition(":")
-        if prefix != self.key[-4:]:
-            raise RiotError("bad_request", "Exception decrypting")
-        if account not in self.riot.accounts:
-            raise RiotError("not_found", "查無此人")  # 帳號已刪除
-        return self.riot.accounts[account]
-
-    def account_puuid(self, name, tag):
-        self._check()
-        account = next((a for a, rid in self.riot.accounts.items() if rid == (name, tag)), None)
-        if account is None:
-            raise RiotError("not_found", "查無此人")
-        return self.riot.puuid(self.key, account)
+def world() -> FakeRiot:
+    riot = FakeRiot()
+    for account, (name, tag) in WORLD.items():
+        riot.add_player(account, name, tag)
+    return riot
 
 
 def config_with_two_keys(riot):
@@ -107,7 +74,7 @@ WORLD = {"me": ("我", "TW2"), "amy": ("Amy", "1"), "bob": ("Bob", "2")}
 
 
 def test_本人每組Key各存一份():
-    riot = FakeRiot(WORLD)
+    riot = world()
     cfg = config_with_two_keys(riot)
 
     assert cfg.my_puuid(K2) == riot.puuid(K2, "me")
@@ -115,7 +82,7 @@ def test_本人每組Key各存一份():
 
 
 def test_刪除Key時_本人它那個版本一併移除():
-    riot = FakeRiot(WORLD)
+    riot = world()
     cfg = config_with_two_keys(riot)
 
     assert cfg.remove_key(K1)
@@ -127,7 +94,7 @@ def test_刪除Key時_本人它那個版本一併移除():
 
 
 def test_本人每組Key各查一次_某組查不到時回報錯誤但保留查到的():
-    riot = FakeRiot(WORLD)
+    riot = world()
     riot.down.add(K2)
 
     found, error = lookup_me(RiotId("我", "TW2"), [K1, K2], riot.client)
@@ -138,30 +105,17 @@ def test_本人每組Key各查一次_某組查不到時回報錯誤但保留查�
 
 def test_刪掉1號讓2號成為使用中的Key_相遇仍然正確():
     """手動驗證項目的無介面版本：稽查用 #2 的假客戶端，本人取 #2 的版本。"""
-    riot = FakeRiot(WORLD)
+    riot = world()
     cfg = config_with_two_keys(riot)
     cfg.remove_key(K1)
     key = cfg.api_keys.first_usable().key
     assert key == K2
 
-    p = lambda account: riot.puuid(key, account)  # 這組 Key 抓到的對戰，裡面的 PUUID 也是這組 Key 的版本
-    games = {f"m{i}": match(f"m{i}", [p("me"), p("amy")], [p("bob")]) for i in range(3)}
-
-    class AuditClient(FakeClient):
-        def match_ids(self, puuid, count):
-            return list(games)[:count]
-
-        def match(self, mid):
-            return games[mid]
-
-        def summoner_level(self, puuid):
-            return 1
-
-        def league_entries(self, puuid):
-            return []
+    for i in range(3):  # 這組 Key 抓到的對戰，裡面的 PUUID 也是這組 Key 的版本
+        riot.add_match(f"m{i}", ["me", "amy"], ["bob"])
 
     seen = []
-    Audit(AuditClient(riot, key), [RiotId("Amy", "1"), RiotId("Bob", "2")],
+    Audit(riot.client(key), [RiotId("Amy", "1"), RiotId("Bob", "2")],
           Me(RiotId("我", "TW2"), cfg.my_puuid(key)), 3, on_player=seen.append).run()
 
     by = {str(r.riot_id): r for r in seen}

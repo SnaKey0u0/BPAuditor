@@ -3,72 +3,28 @@
 Key 的額度是 100 次 / 120 秒，房間＋查對面約 80 次，多一次重複請求就少一分餘裕。
 情境：5 人房間（含本人）、近 5 場；A、B 有 3 場同隊，C 與本人相遇過 1 場。進遊戲後對面 5 人，E1、E2 有 3 場同隊。
 """
-import json
-import re
-from collections import Counter
-
 from bp_auditor.audit import ME, Audit, Me
 from bp_auditor.parsing import RiotId
-from bp_auditor.riot import RateLimiter, RiotClient
+from tests.fakes import FakeRiot
 
 GAMES = 5
 ROOM = ["我", "A", "B", "C", "D"]
 ENEMIES = ["E1", "E2", "E3", "E4", "E5"]
 
 
-def world():
+KEY = "RGAPI-test"
+
+
+def world() -> FakeRiot:
+    """帳號就是名稱（Riot ID「名稱#TW」）；每位玩家近 5 場的對戰 id，同一個 id 的人在同一隊。"""
     ids = {n: [f"{n}-{i}" for i in range(GAMES)] for n in ROOM + ENEMIES}
     ids["B"][:3] = ids["A"][:3]
     ids["C"][2] = ids["我"][2]
     ids["E2"][:3] = ids["E1"][:3]
-    return ids
-
-
-class FakeRiot:
-    """PUUID 是「p-名稱」；每位玩家的對戰 id 由 world() 決定。urls 記下每一個請求。"""
-
-    def __init__(self):
-        self.ids, self.urls = world(), Counter()
-        self.game: dict | None = None  # 觀戰 API 回的進行中對局
-
-    def fetch(self, url, key, timeout):
-        self.urls[url] += 1
-        path = re.sub(r"^https://[^/]+/", "", url)
-        if "/spectator/v5/active-games/" in path:
-            return (200, {}, json.dumps(self.game).encode()) if self.game else (404, {}, b"{}")
-        if "/by-riot-id/" in path:
-            return self._ok({"puuid": "p-" + _unquote(path.split("/")[-2])})
-        if "/accounts/by-puuid/" in path:
-            return self._ok({"gameName": path.split("/")[-1][2:], "tagLine": "TW"})
-        if path.endswith(f"/ids?start=0&count={GAMES}"):
-            return self._ok(self.ids[path.split("/by-puuid/")[1].split("/")[0][2:]])
-        if "/matches/" in path:
-            mid = path.split("/")[-1]
-            ps = [{"puuid": "p-" + n, "teamId": 100, "win": True, "kills": 1, "deaths": 1, "assists": 1,
-                   "championName": "Ahri", "summonerLevel": 30} for n, ms in self.ids.items() if mid in ms]
-            return self._ok({"metadata": {"matchId": mid}, "info": {"participants": ps, "queueId": 450,
-                                                                    "gameDuration": 900, "gameEndTimestamp": 1}})
-        if "/league/" in path:
-            return self._ok([])
-        if "/champion-masteries/" in path:
-            return self._ok({"championLevel": 5, "championPoints": 1000, "lastPlayTime": 0})
-        raise AssertionError(f"沒預期的請求：{url}")
-
-    @staticmethod
-    def _ok(data):
-        return 200, {}, json.dumps(data).encode()
-
-    @property
-    def total(self):
-        return sum(self.urls.values())
-
-    def duplicates(self):
-        return {u: n for u, n in self.urls.items() if n > 1}
-
-
-def _unquote(s):
-    from urllib.parse import unquote
-    return unquote(s)
+    riot = FakeRiot()
+    for n, history in ids.items():
+        riot.add_player(n, history=history)
+    return riot
 
 
 def rid(n):
@@ -77,13 +33,12 @@ def rid(n):
 
 def audit(riot, room, **kw):
     outcome = {}
-    client = RiotClient("RGAPI-test", RateLimiter(limits=((10 ** 6, 1.0),)), fetch=riot.fetch)
-    Audit(client, room, Me(rid("我"), "p-我"), GAMES, on_outcome=lambda o: outcome.update(o=o), **kw).execute()
+    Audit(riot.client(KEY), room, Me(rid("我"), riot.puuid(KEY, "我")), GAMES, on_outcome=lambda o: outcome.update(o=o), **kw).execute()
     return outcome["o"]
 
 
 def test_房間稽查_本人不重複查帳號與對戰id():
-    riot = FakeRiot()
+    riot = world()
     audit(riot, [rid(n) for n in ROOM])
 
     assert riot.duplicates() == {}
@@ -92,9 +47,9 @@ def test_房間稽查_本人不重複查帳號與對戰id():
 
 
 def test_房間多了新人_只查新人_本人不再查():
-    riot = FakeRiot()
+    riot = world()
     first = audit(riot, [rid(n) for n in ROOM[:4]])
-    riot.urls.clear()
+    riot.clear()
 
     audit(riot, [rid(n) for n in ROOM], query=[rid("D")], prior=first.histories)
 
@@ -103,14 +58,14 @@ def test_房間多了新人_只查新人_本人不再查():
 
 
 def test_查對面_沿用我方_本人不再查():
-    riot = FakeRiot()
+    riot = world()
     prior = audit(riot, [rid(n) for n in ROOM]).histories
     assert ME in prior
-    riot.urls.clear()
+    riot.clear()
 
     game = [rid(n) for n in ROOM + ENEMIES]
     audit(riot, game, query=[rid(n) for n in ENEMIES], prior=prior,
-          puuids={str(r): "p-" + r.name for r in game}, champions={str(r): 103 for r in game},
+          puuids={str(r): riot.puuid(KEY, r.name) for r in game}, champions={str(r): 103 for r in game},
           sides=[[ME] + [str(rid(n)) for n in ROOM[1:]], [str(rid(n)) for n in ENEMIES]])
 
     assert riot.duplicates() == {}
