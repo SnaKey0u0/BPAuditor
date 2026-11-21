@@ -62,6 +62,27 @@ def test_限速器_429的RetryAfter也算冷卻():
     assert lim.cooldown() == 30 and lim.try_acquire() == 30
 
 
+def test_限速器_剩下的額度看最長的視窗_也能看幾秒後():
+    clock = FakeClock()
+    lim = RateLimiter(limits=((20, 1.0), (5, 120.0)), clock=clock, sleep=clock.sleep)
+    assert lim.remaining() == 5
+    lim.try_acquire(); lim.try_acquire()
+    clock.now += 60
+    lim.try_acquire()
+    assert lim.remaining() == 2
+    assert lim.remaining(after=61) == 4  # 前兩次已滑出 120 秒視窗
+    assert lim.remaining(after=200) == 5
+    lim.block_for(300)
+    assert lim.remaining() == 2  # 429 的冷卻不算在額度裡（由 cooldown 管）
+
+
+def use_up(rot: KeyRotation, key: str, n: int):
+    """這組 Key 在 120 秒視窗內已經用掉 n 次。"""
+    for _ in range(n):
+        assert rot.limiter(key).try_acquire() == 0
+        rot.clock.now += 0.06  # 避開每秒 20 次的視窗
+
+
 def pool_of(*keys, bad=()) -> KeyPool:
     return KeyPool([ApiKey(k, 0.0, BAD if k in bad else OK) for k in keys])
 
@@ -144,8 +165,8 @@ ROOM = [RiotId("A", "1"), RiotId("B", "1"), RiotId("C", "1")]
 class Run:
     """跑一次會輪替的房間稽查；記下每次重跑、最後一輪的結果。"""
 
-    def __init__(self, pool, *, clock=None, limits=None, riot=None):
-        self.clock, self.riot = clock or FakeClock(), riot or room_world()
+    def __init__(self, pool, *, clock=None, limits=None, riot=None, cost=0):
+        self.clock, self.riot, self.cost = clock or FakeClock(), riot or room_world(), cost
         self.rot = KeyRotation(pool, clock=self.clock, sleep=self.clock.sleep, fetch=self.riot, limits=limits)
         self.jobs: list[str] = []
         self.restarts: list[str] = []
@@ -163,7 +184,7 @@ class Run:
             self.restarts.append(key)
             self.players, self.outcome = [], None  # 舊 Key 的結果整個丟掉
 
-        return run_rotating(self.rot, job, on_restart=restart)
+        return run_rotating(self.rot, job, cost=self.cost, on_restart=restart)
 
     def puuids(self) -> set[str]:
         """最終結果裡出現的所有 PUUID（卡片、近期戰績、近期戰績裡的每一位參與者）。"""
@@ -282,3 +303,61 @@ def test_設定頁每一列的狀態_使用中與冷卻倒數():
     assert key_row_status(ApiKey(K1, 0.0, UNVERIFIED), active=False, cooldown=0) == ("⚠ 未能驗證", "warn")
     assert key_row_status(ApiKey(K1, 0.0, UNVERIFIED), active=True, cooldown=0) == ("✓ 使用中", "active")
     assert key_row_status(ApiKey(K1, 0.0, WARMING), active=False, cooldown=0) == ("新 Key 生效中…", "busy")
+
+
+# ─── 換 Key 前先確認目標 Key 的額度夠整次重跑（#33） ───
+
+def test_輪替_目標Key剩下的額度不夠整次重跑時不換():
+    clock = FakeClock()
+    rot = rotation_of(pool_of(K1, K2, K3), clock)
+    use_up(rot, K2, 95)
+    assert rot.switch_target(K1, 60, cost=20) == K3  # K2 只剩 5 次：跳過，換額度夠的 K3
+    assert rot.switch_target(K1, 60, cost=5) == K2   # 剛好夠
+    use_up(rot, K3, 90)
+    assert rot.switch_target(K1, 60, cost=20) is None  # 都不夠：留在原 Key 等
+    assert rot.switch_target(K1, 60) == K2  # 沒給 cost：照舊
+
+
+def test_輪替_全部冷卻時挑最早解除的也看額度_以解除時剩下的額度算():
+    clock = FakeClock()
+    rot = rotation_of(pool_of(K1, K2, K3), clock)
+    rot.limiter(K2).block_for(30)
+    use_up(rot, K3, 95); rot.limiter(K3).block_for(10)
+    assert rot.switch_target(K1, 50, cost=20) == K2  # K3 較早解除但只剩 5 次
+    assert rot.switch_target(K1, 20, cost=20) is None  # K2 比自己晚解除
+
+    clock2 = FakeClock()
+    rot2 = rotation_of(pool_of(K1, K2), clock2)
+    use_up(rot2, K2, 100)  # K2 額滿冷卻；最早那次滑出視窗後額度才回來
+    clock2.now += 110
+    assert rot2.cooling(K2) and rot2.limiter(K2).remaining() == 0
+    assert rot2.switch_target(K1, 60, cost=1) == K2  # 解除冷卻時已有額度
+    assert rot2.switch_target(K1, 60, cost=50) is None  # 解除時只滑出少數幾次，不夠
+
+
+def test_換Key前額度夠_照常換過去重跑():
+    run = Run(pool_of(K1, K2), cost=20)
+    use_up(run.rot, K2, 50)
+    run.riot.fail(K1, 429, retry_after=60, start=3)
+    assert run() == K2
+    assert run.restarts == [K2]
+
+
+def test_換Key前額度不夠整次重跑_留在原Key等冷卻_不重跑():
+    run = Run(pool_of(K1, K2), cost=20)
+    use_up(run.rot, K2, 95)
+    slept = run.clock.slept
+    run.riot.fail(K1, 429, retry_after=60, start=3)
+    assert run() == K1
+    assert run.jobs == [K1] and run.restarts == []
+    assert run.clock.slept - slept >= 60
+    assert {p.error for p in run.players} == {None} and len(run.players) == 3
+    assert {pu.split(":")[0] for pu in run.puuids()} == {key_tag(K1)}
+
+
+def test_回401時不看額度_照舊換():
+    run = Run(pool_of(K1, K2), cost=50)
+    use_up(run.rot, K2, 95)
+    run.riot.fail(K1, 401, start=2, times=99)
+    assert run() == K2
+    assert run.restarts == [K2]

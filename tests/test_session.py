@@ -194,6 +194,29 @@ def test_查對面換Key重跑_用新Key重查一次對局取得PUUID():
     assert {p.puuid for p, _ in rec.players} == {puuid(K2, n) for n in ROOM_NAMES + ENEMIES}  # 全是 K2 的版本
 
 
+def test_整次重跑的請求數估計_人數乘近期場數加3_查對面加1_而且是上限():
+    """換 Key 前用來確認目標 Key 的額度夠不夠（#33）：實際重跑的請求數不會超過估計。"""
+    s, riot = AuditSession(), world()
+    room_audit(s, riot, ["我", "A"])
+    plan = s.plan_room([rid("我"), rid("A"), rid("B")], K1)
+    s.enter_room(plan)
+    req = s.request(plan.query, K1, games=GAMES, me_riot_id=ME_RID, my_puuids={K2: puuid(K2, "我")})
+    assert req.rerun_cost == 3 * (GAMES + 3)
+    riot.clear()
+    req.job(Recorder().listener())(K2, riot.client(K2))
+    assert riot.total <= req.rerun_cost
+
+    s, riot = AuditSession(), world()
+    plan = s.plan_game(spectator(riot, K1, ROOM_NAMES, ENEMIES), K1, puuid(K1, "我"))
+    s.enter_game(plan, K1)
+    req = s.request(plan.query, K1, games=GAMES, me_riot_id=ME_RID, my_puuids={K2: puuid(K2, "我")},
+                    puuids=plan.puuids, champions=plan.champions, sides=plan.sides)
+    assert req.rerun_cost == 10 * (GAMES + 3) + 1
+    riot.clear()
+    req.job(Recorder().listener())(K2, riot.client(K2))
+    assert riot.total <= req.rerun_cost
+
+
 def test_換Key了_舊Key的近期戰績丟掉():
     s = AuditSession()
     room_audit(s, world(), ["我", "A"])

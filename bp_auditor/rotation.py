@@ -90,13 +90,16 @@ class KeyRotation:
         with self._lock:
             self._current = key
 
-    def switch_target(self, key: str, wait: float) -> str | None:
+    def switch_target(self, key: str, wait: float, cost: int = 0) -> str | None:
         """key 要等 wait 秒（冷卻；失效時是無限久）：該換哪一組？
-        有沒在冷卻的就換它（依序循環）；全部冷卻時換最早解除、而且比自己早的；都沒有就回 None，留下來等。"""
+        有沒在冷卻的就換它（依序循環）；全部冷卻時換最早解除、而且比自己早的；都沒有就回 None，留下來等。
+        cost：換過去整次稽查要重跑幾次請求。只換到解除冷卻時 2 分鐘視窗內還剩 cost 次以上額度的 Key，
+        否則換過去也注定冷卻，比留下來等還慢（#33）。預設 0：不看額度。"""
         if wait < self.switch_after:
             return None
         with self._lock:
-            others = self._cycle(key, include=False)
+            others = [k for k in self._cycle(key, include=False)
+                      if self.limiter(k).remaining(self.cooldown(k)) >= cost]
             if free := next((k for k in others if not self.cooling(k)), None):
                 return free
             earliest = min(others, key=self.cooldown, default=None)
@@ -133,7 +136,7 @@ def key_row_status(entry: ApiKey, active: bool, cooldown: float, switch_after: f
     return "✓ 可用", "ok"
 
 
-def run_rotating(rotation: KeyRotation, job: Callable[[str, RiotClient], T], *,
+def run_rotating(rotation: KeyRotation, job: Callable[[str, RiotClient], T], *, cost: int = 0,
                  on_restart: Callable[[str], None] = lambda key: None,
                  on_key_error: Callable[[str], None] = lambda key: None) -> T:
     """用使用中的 Key 跑一次 job(key, client)（一次完整的稽查）。
@@ -144,6 +147,8 @@ def run_rotating(rotation: KeyRotation, job: Callable[[str, RiotClient], T], *,
     全部冷卻時等最早解除的那一組；只有一組 Key 時冷卻就等，不重跑。
     同一次稽查因冷卻換 Key 最多換「Key 數」次，之後就留下來等：一次稽查的請求數超過單組 Key 的額度時，
     才不會在幾組 Key 之間永遠重跑下去。沒有可用的 Key 時拋 RiotError('key')。
+    cost：整次重跑要幾次請求（例如 AuditRequest.rerun_cost）。因冷卻換 Key 時，目標 Key 的額度不夠就不換、
+    留在原 Key 等（KeyRotation.switch_target）；401/403 照舊一定換。預設 0：不看額度。
     """
     budget = rotation.usable_count()
     switches = 0
@@ -151,7 +156,7 @@ def run_rotating(rotation: KeyRotation, job: Callable[[str, RiotClient], T], *,
     def switch(key: str, wait: float) -> str | None:
         if wait != math.inf and switches >= budget:
             return None
-        return rotation.switch_target(key, wait)
+        return rotation.switch_target(key, wait, 0 if wait == math.inf else cost)
 
     while True:
         key = rotation.current()

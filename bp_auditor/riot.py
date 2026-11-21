@@ -181,6 +181,14 @@ class RateLimiter:
         with self._lock:
             return self._wait(self.clock())
 
+    def remaining(self, after: float = 0.0) -> int:
+        """最長的視窗（預設 120 秒 100 次）在 after 秒後還剩幾次額度；不含 429 的冷卻（那由 cooldown 管）。
+        換 Key 前用來估目標 Key 夠不夠整次稽查重跑（rotation.KeyRotation.switch_target）。"""
+        count, window = max(self._limits, key=lambda l: l[1])
+        with self._lock:
+            at = self.clock() + after
+            return max(0, count - sum(1 for t in self._stamps if at - t < window))
+
     def try_acquire(self) -> float:
         """能發就記下這次請求並回 0；不能發就回還要等幾秒，不睡。"""
         with self._lock:

@@ -120,10 +120,11 @@ class KeyManager:
         """沒有可用的 Key，但有新 Key 在等 Riot 啟用：這段期間的稽查先排隊。"""
         return not self.active_key() and any(k.status == WARMING for k in self.cfg.api_keys)
 
-    def run(self, job: Callable[[str, RiotClient], T], on_key_failed: Callable[[str], None]) -> T:
+    def run(self, job: Callable[[str, RiotClient], T], on_key_failed: Callable[[str], None], cost: int = 0) -> T:
         """（背景執行緒）用使用中的 Key 跑 job(key, client)；冷卻或失效時輪替、整個 job 用新 Key 重跑（ADR 0002）。
-        途中回 401/403 的 Key 只讓 rotation 先跳過，再用 on_key_failed 通知介面執行緒呼叫 key_failed。"""
-        return run_rotating(self.rotation, job, on_key_error=on_key_failed)
+        途中回 401/403 的 Key 只讓 rotation 先跳過，再用 on_key_failed 通知介面執行緒呼叫 key_failed。
+        cost：整次重跑要幾次請求；目標 Key 的額度不夠就不因冷卻換過去（run_rotating）。"""
+        return run_rotating(self.rotation, job, cost=cost, on_key_error=on_key_failed)
 
     # ─── Key 清單 ───
     def add_key(self, key: str, now: float) -> list[Action] | None:
