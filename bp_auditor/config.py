@@ -7,7 +7,8 @@ from pathlib import Path
 from .analysis import POKE_DEATHS_PER_MINUTE, POKE_KDA_AT_MOST
 from .blacklist import Blacklist
 from .keys import KeyPool
-from .puuids import Versions
+
+Versions = dict[str, str]  # Key → 該 Key 加密的 PUUID；查不到的 Key 不會出現（PUUID 依 Key 加密，ADR 0002）
 
 
 def config_path() -> Path:

@@ -197,12 +197,15 @@ def test_本地限速要等超過換Key門檻時_換下一組_不會先等待():
     assert {pu.split(":")[0] for pu in run.puuids()} == {key_tag(K2)}
 
 
-def test_稽查中回401的Key標成失效_換下一組重跑():
+def test_稽查中回401的Key先跳過_換下一組重跑_背景執行緒不改Key清單():
     pool = pool_of(K1, K2, K3)
     run = Run(pool)
     run.riot.fail(K1, 401, start=2, times=99)
     assert run() == K2
-    assert pool.get(K1).status == BAD
+    assert pool.get(K1).status == OK  # 清單狀態由介面執行緒更新（key_manager）
+    assert run.rot.usable_count() == 2
+    run.rot.limiter(K2).block_for(60)
+    assert run.rot.current() == K3  # 輪替跳過 K1
     assert {pu.split(":")[0] for pu in run.puuids()} == {key_tag(K2)}
 
 

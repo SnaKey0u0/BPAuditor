@@ -21,7 +21,8 @@ T = TypeVar("T")
 class KeyRotation:
     """Key 清單的輪替狀態：使用中的 Key，與每組 Key 各自的限速器。執行緒安全。
 
-    pool 可以是會變的清單（介面執行緒會新增／刪除 Key）：這裡每次都先取 snapshot 再走訪，背景執行緒不直接走訪原清單。"""
+    pool 可以是會變的清單（介面執行緒會新增／刪除 Key）：這裡每次都先取 snapshot 再走訪，背景執行緒不直接走訪原清單。
+    背景執行緒不改 Key 清單：稽查中回 401/403 的 Key 只記在這裡先跳過（mark_bad），清單狀態由介面執行緒更新（key_manager）。"""
 
     def __init__(self, pool: KeyPool | Callable[[], KeyPool], *, clock=time.monotonic, sleep=time.sleep,
                  fetch=None, limits=None, switch_after: float = SWITCH_AFTER):
@@ -30,6 +31,7 @@ class KeyRotation:
         self._limits, self.switch_after = limits, switch_after
         self._limiters: dict[str, RateLimiter] = {}
         self._current = ""
+        self._skipped: set[str] = set()  # 稽查中回 401/403、介面執行緒還沒更新清單狀態的 Key
         self._lock = threading.RLock()
 
     # ─── 限速 ───
@@ -56,15 +58,19 @@ class KeyRotation:
         """Key 清單的複本（見 KeyPool.snapshot）。"""
         return self._pool().snapshot()
 
+    def _usable(self, entry: ApiKey) -> bool:
+        with self._lock:
+            return entry.usable and entry.key not in self._skipped
+
     def usable_count(self) -> int:
         """現在有幾組可用的 Key。"""
-        return sum(k.usable for k in self._entries())
+        return sum(self._usable(k) for k in self._entries())
 
     def _cycle(self, after: str, include: bool) -> list[str]:
         """可用的 Key，從 after 開始依序循環（include：after 自己排第一個）。after 不在清單裡時從頭開始。"""
         entries = self._entries()
         keys = [k.key for k in entries]
-        usable = {k.key for k in entries if k.usable}
+        usable = {k.key for k in entries if self._usable(k)}
         if after in keys:
             i = keys.index(after)
             keys = keys[i:] + keys[:i] if include else keys[i + 1:] + keys[:i]
@@ -97,10 +103,15 @@ class KeyRotation:
             return earliest if earliest and self.cooldown(earliest) < wait else None
 
     def mark_bad(self, key: str):
-        """預設的失效處理：標成失效，之後挑 Key 時跳過。"""
-        for k in self._entries():
-            if k.key == key:
-                k.status = BAD
+        """（背景執行緒）稽查中回 401/403：之後挑 Key 時先跳過。只記在記憶體、不改 Key 清單；
+        生效中還是失效由介面執行緒判定（key_manager），判定完再 clear_bad。"""
+        with self._lock:
+            self._skipped.add(key)
+
+    def clear_bad(self, key: str):
+        """介面執行緒已更新這組 Key 在清單裡的狀態，不必再另外跳過。"""
+        with self._lock:
+            self._skipped.discard(key)
 
 
 def key_row_status(entry: ApiKey, active: bool, cooldown: float, switch_after: float = SWITCH_AFTER) -> tuple[str, str]:
@@ -124,16 +135,16 @@ def key_row_status(entry: ApiKey, active: bool, cooldown: float, switch_after: f
 
 def run_rotating(rotation: KeyRotation, job: Callable[[str, RiotClient], T], *,
                  on_restart: Callable[[str], None] = lambda key: None,
-                 on_key_error: Callable[[str], None] | None = None) -> T:
+                 on_key_error: Callable[[str], None] = lambda key: None) -> T:
     """用使用中的 Key 跑一次 job(key, client)（一次完整的稽查）。
 
-    job 途中 Key 冷卻（本地限速或 429 要等太久）而有別組 Key 可換，或回 401/403（先用 on_key_error 把它標成
-    不可用，預設是失效）時，整個 job 用新 Key 從頭重跑，舊 Key 查到的結果都不要（on_restart 通知畫面丟掉）。
+    job 途中 Key 冷卻（本地限速或 429 要等太久）而有別組 Key 可換，或回 401/403（rotation 先跳過它，
+    再用 on_key_error 通知介面執行緒更新清單狀態）時，整個 job 用新 Key 從頭重跑，舊 Key 查到的結果都不要
+    （on_restart 通知畫面丟掉）。
     全部冷卻時等最早解除的那一組；只有一組 Key 時冷卻就等，不重跑。
     同一次稽查因冷卻換 Key 最多換「Key 數」次，之後就留下來等：一次稽查的請求數超過單組 Key 的額度時，
     才不會在幾組 Key 之間永遠重跑下去。沒有可用的 Key 時拋 RiotError('key')。
     """
-    on_key_error = on_key_error or rotation.mark_bad
     budget = rotation.usable_count()
     switches = 0
 
@@ -150,6 +161,7 @@ def run_rotating(rotation: KeyRotation, job: Callable[[str, RiotClient], T], *,
             return job(key, rotation.client(key, switch))
         except KeySwitch as s:
             if s.reason == "bad":
+                rotation.mark_bad(s.key)
                 on_key_error(s.key)
             else:
                 switches += 1
