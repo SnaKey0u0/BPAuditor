@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .analysis import POKE_DEATHS_PER_MINUTE, POKE_KDA_AT_MOST
+from .blacklist import Blacklist
 from .keys import KeyPool
 from .puuids import Versions
 
@@ -26,16 +27,19 @@ class Config:
     # 舊版的門檻欄位（送頭場的 feeding_*、戳場的 poke_kd_at_most）不是 Config 的欄位，載入時捨棄、不沿用（#24）
     poke_deaths_per_minute: float = POKE_DEATHS_PER_MINUTE
     poke_kda_at_most: float = POKE_KDA_AT_MOST
+    # 黑名單：每筆記 Riot ID 與各組 Key 的 PUUID，比對時自動補齊（#25）；v1.4.2 的舊格式載入時捨棄
+    blacklist: Blacklist = field(default_factory=Blacklist)
 
     def my_puuid(self, key: str) -> str:
         """本人在這組 Key 下的 PUUID；還沒查到時是空字串。"""
         return self.my_puuids.get(key, "") if key else ""
 
     def remove_key(self, key: str) -> bool:
-        """從 Key 清單刪除，並一併刪掉本人在它那個版本的 PUUID。"""
+        """從 Key 清單刪除，並一併刪掉本人與黑名單在它那個版本的 PUUID（黑名單整筆保留，仍能以 Riot ID 比對）。"""
         if not self.api_keys.remove(key):
             return False
         self.my_puuids.pop(key.strip(), None)
+        self.blacklist.drop_key(key.strip())
         return True
 
     @classmethod
@@ -43,6 +47,7 @@ class Config:
         try:
             data = _migrate_puuids(_migrate_keys(
                 json.loads(config_path().read_text(encoding="utf-8"))))
+            data["blacklist"] = Blacklist.from_json(data.get("blacklist"))
             return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
         except (OSError, ValueError, TypeError, AttributeError):
             return cls()
@@ -50,7 +55,7 @@ class Config:
     def save(self):
         p = config_path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        data = {**asdict(self), "api_keys": self.api_keys.to_json()}
+        data = {**asdict(self), "api_keys": self.api_keys.to_json(), "blacklist": self.blacklist.to_json()}
         p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -64,8 +69,7 @@ def _migrate_keys(data: dict) -> dict:
 
 def _migrate_puuids(data: dict) -> dict:
     """舊設定檔的本人 PUUID 只出自一組 Key（my_puuid）：歸到清單的 #1。
-    清單沒有 Key 時無從歸屬，捨棄（PUUID 不知道是哪組 Key 加密的，比對不到任何人）。
-    黑名單已移除（#12）：舊設定檔的 blacklist 欄位不是 Config 的欄位，載入時捨棄，下次存檔就消失。"""
+    清單沒有 Key 時無從歸屬，捨棄（PUUID 不知道是哪組 Key 加密的，比對不到任何人）。"""
     first = next((k.key for k in data["api_keys"]), "")
     if "my_puuids" not in data:
         old = str(data.get("my_puuid") or "")
