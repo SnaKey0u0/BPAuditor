@@ -29,10 +29,13 @@ class FakeRiot:
 
     def __init__(self):
         self.ids, self.urls = world(), Counter()
+        self.game: dict | None = None  # 觀戰 API 回的進行中對局
 
     def fetch(self, url, key, timeout):
         self.urls[url] += 1
         path = re.sub(r"^https://[^/]+/", "", url)
+        if "/spectator/v5/active-games/" in path:
+            return (200, {}, json.dumps(self.game).encode()) if self.game else (404, {}, b"{}")
         if "/by-riot-id/" in path:
             return self._ok({"puuid": "p-" + _unquote(path.split("/")[-2])})
         if "/accounts/by-puuid/" in path:
