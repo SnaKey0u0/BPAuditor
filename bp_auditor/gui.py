@@ -18,22 +18,21 @@ from PySide6.QtWidgets import (
     QSpacerItem, QStackedWidget, QSystemTrayIcon, QToolTip, QVBoxLayout, QWidget,
 )
 
-from . import autostart, puuids, single, tiles
+from . import autostart, key_manager as km, single, tiles
 from .analysis import GameSummary, Mastery, PremadeGroup, game_summaries, streak
 from .audit import ME, AuditOutcome, Me, PlayerResult
 from .champions import Champions, Icon, download_asset, download_icon, icon_dir, icon_path
 from .config import Config
-from .keys import BAD, OK, UNVERIFIED, WARMING, mask
+from .keys import mask
 from .parsing import RiotId, parse_room_messages, room_members_in_clipboard
 from .riot import KEY_PAGE, RiotClient, RiotError, find_api_key
-from .rotation import KeyRotation, key_row_status, run_rotating
+from .rotation import KeyRotation, key_row_status
 from .session import GAME, ROOM, AuditSession, Listener, RoomPlan, card_key
 
 GROUP_COLORS = ["#ffb300", "#ab47bc", "#29b6f6", "#ef6c00"]
 RED, GREEN, GREY, BLUE, ORANGE = "#ef5350", "#66bb6a", "#9e9e9e", "#90caf9", "#ffb300"
 SKELETON = "#323844"
 NEON = "#18ffff"  # 戳場的霓虹光暈與標籤
-KEY_RECHECK_MS = 15_000
 GAME_POLL_DELAY_MS = 60_000  # 房間稽查完先等 60 秒（排隊＋選角）才開始問觀戰 API
 GAME_POLL_MS = 10_000  # 之後每 10 秒問一次，看開局了沒
 GAME_POLL_FOR = 5 * 60  # 開始問之後最多問這麼久
@@ -127,12 +126,12 @@ class Bridge(QObject):
     done = Signal()
     champions = Signal(object)
     key_checked = Signal(str, str, str)  # (key, 錯誤種類, 錯誤訊息)；種類為空字串代表有效
-    me_lookup = Signal(str, object, str)  # (Riot ID, {Key: puuid}, 錯誤訊息)；某組查不到時其他組照樣存
+    me_lookup = Signal(str, object, object)  # (Riot ID, {Key: puuid}, 第一個 RiotError 或 None)；某組查不到時其他組照樣存
     icon_ready = Signal()
     game = Signal(object, str, bool, str)  # (進行中對局或 None, 錯誤訊息, 是否手動, 查詢所用的 Key)
     mastery = Signal(str, object)  # (標籤, Mastery 或 None)
     restart = Signal(str, int)  # (新 Key, 要查的人數)：換 Key 了，整次稽查從頭重跑，舊結果丟掉（ADR 0002）
-    key_failed = Signal(str)  # 稽查中回 401/403 的 Key（已標成不可用），換下一組重跑
+    key_failed = Signal(str)  # 稽查中回 401/403 的 Key（rotation 已先跳過、換下一組重跑）；清單狀態在介面執行緒更新
     audit_error = Signal(str)  # 稽查沒辦法開始（例如沒有可用的 Key）
 
 
@@ -735,12 +734,9 @@ class SettingsPage(QWidget):
         rid = RiotId.parse(text) if text else None
         if text and (rid is None or "進入組隊房間" in text):
             self._me_state(f"<span style='color:{RED}'>格式是 名稱#標籤</span>"); return
-        cfg.my_riot_id, cfg.my_puuids = text, {}  # 換了本人：每組 Key 都用新的 Riot ID 重查
-        cfg.save()
-        self._me_state("")
-        if rid and self.win.active_key():
-            self._me_state(grey("確認中…"))
-            self.win.lookup_me(rid)
+        actions = self.win.key_manager.set_me(text)  # 換了本人：每組 Key 都用新的 Riot ID 重查
+        self._me_state(grey("確認中…") if any(isinstance(a, km.LookUpMe) for a in actions) else "")
+        self.win.apply(actions)
 
     def _me_state(self, html: str):
         self.me_state.setText(html); self.form.setRowVisible(self.me_state, bool(html))
@@ -779,6 +775,8 @@ class MainWindow(QMainWindow):
         self.champions = Champions()
         # 每組 Key 各自的限速（跨次稽查也遵守）與使用中的 Key；冷卻時輪替到下一組（#11）
         self.rotation = KeyRotation(lambda: self.cfg.api_keys)
+        # Key 清單的驗證與失效、使用中的 Key、本人每組 Key 的 PUUID（不碰 Qt，見 key_manager.py）
+        self.key_manager = km.KeyManager(self.cfg, self.rotation)
         self.cards: dict[str, PlayerCard] = {}
         # 房間 → 對局的稽查狀態與「要查誰、沿用誰」的決定（不碰 Qt，見 session.py）
         self.session = AuditSession()
@@ -928,8 +926,8 @@ class MainWindow(QMainWindow):
 
     # ─── API Key ───
     def active_key(self) -> str:
-        """使用中的 Key：一直用同一組，冷卻了才依序換下一組（rotation.KeyRotation）；沒有可用的時是空字串。"""
-        return self.rotation.current()
+        """使用中的 Key：一直用同一組，冷卻或失效了才依序換下一組；沒有可用的時是空字串。"""
+        return self.key_manager.active_key()
 
     def client_for(self, key: str) -> RiotClient:
         """指定 Key 的客戶端（遵守它自己的限速，冷卻就等）：補查本人等只能用這組 Key 的請求。"""
@@ -939,12 +937,44 @@ class MainWindow(QMainWindow):
         if self.right.currentIndex() == 1:
             self.settings.keys.tick()
 
-    def usable_keys(self, but: str = "") -> list[str]:
-        return [k.key for k in self.cfg.api_keys if k.usable and k.key != but]
-
     def key_warming(self) -> bool:
         """沒有可用的 Key，但有新 Key 在等 Riot 啟用：這段期間的稽查先排隊。"""
-        return not self.active_key() and any(k.status == WARMING for k in self.cfg.api_keys)
+        return self.key_manager.warming()
+
+    def apply(self, actions: list[km.Action]):
+        """依序執行 key_manager 回傳的動作。"""
+        for a in actions:
+            match a:
+                case km.Save():
+                    self.cfg.save()
+                case km.RedrawKeys(hide_banner=hide):
+                    if hide:
+                        self.key_banner.hide()
+                    self.update_key_status()
+                case km.Recheck(key, 0):
+                    self.check_key(key)
+                case km.Recheck(key, delay):  # 到時候已經被刪掉就不驗
+                    QTimer.singleShot(delay, lambda key=key: self.cfg.api_keys.get(key) and self.check_key(key))
+                case km.LookUpMe(rid, keys):
+                    self.lookup_me(rid, list(keys))
+                case km.RunPending():
+                    if self.pending and not self.running and not self.key_warming():
+                        members, auto, force = self.pending
+                        self.pending = None
+                        self.start_room(members, auto, force)
+                case km.RequeueAudit():
+                    if self.session.view == ROOM:
+                        self.pending = (self.session.room, False, True)  # 整房重查
+                case km.Message(text):
+                    self.status.setText(text)
+                case km.Alert():
+                    QApplication.alert(self)
+                case km.ShowMe(riot_id, note):
+                    self.settings.me.setText(riot_id)
+                    if note:
+                        self.me_note = note
+                case km.MeLookedUp(error):
+                    self.settings.show_me_lookup(error)
 
     def update_key_status(self):
         pool = self.cfg.api_keys
@@ -960,11 +990,6 @@ class MainWindow(QMainWindow):
         if pool.all_bad:
             self.show_key_banner("所有 API Key 都失效了，請重新產生", "取得新 Key")
 
-    def on_keys_changed(self):
-        """清單或狀態變了：存檔、重畫。本人每組 Key 各有一份 PUUID，換使用中的 Key 不必重查。"""
-        self.cfg.save()
-        self.update_key_status()
-
     def start_key_refresh(self):
         self.waiting_key = True
         self.update_key_status()
@@ -973,12 +998,10 @@ class MainWindow(QMainWindow):
     def accept_key(self, key: str) -> bool:
         """加入 Key 清單（加在最後）並驗證；已經在清單裡就不加，回 False。"""
         self.waiting_key = False
-        entry = self.cfg.api_keys.add(key, time.time())
-        if entry is None:
+        actions = self.key_manager.add_key(key, time.time())
+        if actions is None:
             self.update_key_status(); return False
-        self.key_banner.hide()
-        self.on_keys_changed()
-        self.check_key(entry.key)
+        self.apply(actions)
         return True
 
     def is_blacklisted(self, key: str, puuid: str, riot_id: str) -> bool:
@@ -996,9 +1019,7 @@ class MainWindow(QMainWindow):
             c.show_blacklist()
 
     def remove_key(self, key: str):
-        if self.cfg.remove_key(key):  # 本人在它那個版本的 PUUID 一併刪掉
-            self.key_banner.hide()
-            self.on_keys_changed()
+        self.apply(self.key_manager.remove_key(key))  # 本人與黑名單在它那個版本的 PUUID 一併刪掉
 
     def check_key(self, key: str):
         def check():
@@ -1008,39 +1029,9 @@ class MainWindow(QMainWindow):
                 self.bridge.key_checked.emit(key, e.kind, str(e))
         threading.Thread(target=check, daemon=True).start()
 
-    def warm_up_key(self, key: str):
-        """剛產生的 Key 要等 Riot 啟用（約 1–2 分鐘）：每 15 秒重驗一次；沒有其他可用的 Key 時稽查先排隊。"""
-        self.cfg.api_keys.set_status(key, WARMING)
-        self.key_banner.hide()
-        self.on_keys_changed()
-        QTimer.singleShot(KEY_RECHECK_MS, lambda: self.check_key(key) if self.cfg.api_keys.get(key) else None)
-
     def on_key_checked(self, key: str, kind: str, error: str):
-        if not self.cfg.api_keys.get(key):
-            return  # 驗證期間被刪掉了
-        if kind == "key":  # 回 401/403：剛加入的當作生效中，否則失效（不自動刪除，由使用者決定）
-            if self.cfg.api_keys.auth_failed(key, time.time()) == WARMING:
-                self.warm_up_key(key); return
-        else:
-            # 驗證通過；或是連線／伺服器問題，分不出 Key 好壞，先當作可用（標成「未能驗證」，與驗證過的分開）
-            self.cfg.api_keys.set_status(key, UNVERIFIED if error else OK)
-            if error:
-                self.status.setText(f"驗證 Key 時發生錯誤：{error}")
-        self.on_keys_changed()
-        if kind != "key":
-            self.backfill_key(key)
-        if not error:
-            if self.pending and not self.running and not self.key_warming():
-                members, auto, force = self.pending
-                self.pending = None
-                self.start_room(members, auto, force)
-        QApplication.alert(self)
-
-    def backfill_key(self, key: str):
-        """Key 可用之後：本人用 Riot ID 查一次這組 Key 的 PUUID；已經有這組的版本就不查。"""
-        rid = RiotId.parse(self.cfg.my_riot_id) if self.cfg.my_riot_id else None
-        if rid and not self.cfg.my_puuid(key):
-            self.lookup_me(rid, [key])
+        """驗證結果；剛產生的 Key 回 401/403 時是生效中，15 秒後重驗（見 key_manager）。"""
+        self.apply(self.key_manager.key_checked(key, kind, error, time.time()))
 
     def show_key_banner(self, text: str, button: str):
         self.key_banner_text.setText(text); self.key_banner_btn.setText(button)
@@ -1053,23 +1044,15 @@ class MainWindow(QMainWindow):
             self.show_settings()
 
     # ─── 本人 ───
-    def lookup_me(self, rid: RiotId, keys: list[str] | None = None):
-        """用本人的 Riot ID 在每組 Key（預設：所有可用的 Key）下各查一次 PUUID。"""
-        keys = self.usable_keys() if keys is None else keys
-
+    def lookup_me(self, rid: RiotId, keys: list[str]):
+        """用本人的 Riot ID 在這些 Key 下各查一次 PUUID；結果交回 key_manager 存。"""
         def run():
-            found, e = puuids.lookup_me(rid, keys, self.client_for)
-            error = "" if found or e is None else "找不到這個 Riot ID" if e.kind == "not_found" else str(e)
-            self.bridge.me_lookup.emit(str(rid), found, error)
+            found, e = km.lookup_me(rid, keys, self.client_for)
+            self.bridge.me_lookup.emit(str(rid), found, e)
         threading.Thread(target=run, daemon=True).start()
 
-    def on_me_lookup(self, rid: str, found: dict, error: str):
-        if rid != self.cfg.my_riot_id:
-            return
-        found = {k: v for k, v in found.items() if self.cfg.api_keys.get(k)}  # 查詢期間被刪掉的 Key 不存
-        if found:
-            self.cfg.my_puuids.update(found); self.cfg.save()
-        self.settings.show_me_lookup(error)
+    def on_me_lookup(self, rid: str, found: dict, error: RiotError | None):
+        self.apply(self.key_manager.me_looked_up(rid, found, error))
 
     def my_riot_id(self) -> RiotId | None:
         return RiotId.parse(self.cfg.my_riot_id) if self.cfg.my_riot_id else None
@@ -1079,18 +1062,8 @@ class MainWindow(QMainWindow):
         return bool(me and m.same_as(me))
 
     def on_me(self, me: Me, key: str):
-        """稽查中查到本人改名，或補查到 key 的 PUUID。改名不影響其他 Key 的 PUUID（帳號不變）；
-        其他還沒有版本的 Key 用新的 Riot ID 補查。"""
-        old = self.cfg.my_riot_id
-        self.cfg.my_riot_id = str(me.riot_id)
-        if self.cfg.api_keys.get(key):
-            self.cfg.my_puuids[key] = me.puuid
-        self.cfg.save()
-        self.settings.me.setText(self.cfg.my_riot_id)
-        if old and RiotId.parse(old) != me.riot_id:
-            self.me_note = f"你的 Riot ID 已更新為 {me.riot_id}"
-        if missing := [k for k in self.usable_keys() if not self.cfg.my_puuid(k)]:
-            self.lookup_me(me.riot_id, missing)
+        """稽查中查到本人（可能改名了）與他在 key 的 PUUID。"""
+        self.apply(self.key_manager.me_found(me, key))
 
     # ─── 雜項 ───
     def _load_champions(self):
@@ -1284,40 +1257,35 @@ class MainWindow(QMainWindow):
 
     def _run_audit(self, query: list[RiotId], key: str = "", **game):
         """在背景跑一次稽查。key：指定要用的 Key（查對面時是查到對局的那組）；空字串用使用中的 Key。
-        途中 Key 冷卻或失效而換 Key 時，整次稽查用新 Key 從頭重跑（rotation.run_rotating、ADR 0002）。"""
+        途中 Key 冷卻或失效而換 Key 時，整次稽查用新 Key 從頭重跑（_run_with_key、ADR 0002）。"""
         self.running, self.done_count, self.total, self.t0 = True, 0, len(query), time.monotonic()
         self.me_note = self.switch_note = ""
         self.audit_btn.setEnabled(False)
         self.update_progress()
         self.progress_timer.start(500)
         b = self.bridge
-        if key:
-            self.rotation.set_current(key)
         # 一次稽查的所有資料都出自同一組 Key（ADR 0002）；背景執行緒只用開始時的複本
-        req = self.session.request(query, key or self.active_key(), games=self.cfg.recent_games,
+        req = self.session.request(query, self.key_manager.use(key), games=self.cfg.recent_games,
                                    me_riot_id=self.my_riot_id(), my_puuids=self.cfg.my_puuids, **game)
         job = req.job(Listener(b.player.emit, b.me.emit, b.outcome.emit, b.mastery.emit, b.restart.emit))
+        self._run_with_key(job, lambda _: None, lambda e: b.audit_error.emit(str(e)), b.done.emit)
 
+    def _run_with_key(self, job: Callable[[str, RiotClient], object], on_result: Callable[[object], None],
+                      on_error: Callable[[RiotError], None], on_exit: Callable[[], None] = lambda: None):
+        """在背景用使用中的 Key 跑 job（稽查與查對面共用）：冷卻或失效時輪替，整個 job 用新 Key 重跑。
+        回 401/403 的 Key 經 key_failed 訊號交回介面執行緒更新清單狀態，背景執行緒不改設定。"""
         def run():
             try:
-                run_rotating(self.rotation, job, on_key_error=self._key_failed_in_audit)
+                on_result(self.key_manager.run(job, self.bridge.key_failed.emit))
             except RiotError as e:
-                b.audit_error.emit(str(e))
+                on_error(e)
             finally:
-                b.done.emit()
+                on_exit()
         threading.Thread(target=run, daemon=True).start()
 
-    def _key_failed_in_audit(self, key: str):
-        """（背景執行緒）稽查中回 401/403：馬上標成不可用，輪替才會跳過它；剛產生的 Key 當作還沒生效。"""
-        self.cfg.api_keys.auth_failed(key, time.time())
-        self.bridge.key_failed.emit(key)
-
     def on_key_failed(self, key: str):
-        entry = self.cfg.api_keys.get(key)
-        if entry and entry.status == WARMING:
-            self.warm_up_key(key)  # 15 秒後重驗
-        else:
-            self.on_keys_changed()
+        """稽查中回 401/403、已換下一組重跑：更新這組 Key 的狀態（生效中或失效）。"""
+        self.apply(self.key_manager.key_failed(key, time.time(), switched=True))
 
     def on_restart(self, key: str, total: int):
         """換 Key 了：整次稽查用新 Key 從頭重跑，畫面上舊 Key 查到的結果全部清掉（ADR 0002）。"""
@@ -1345,15 +1313,9 @@ class MainWindow(QMainWindow):
                 self._mark_me(card, k)
         self.done_count += 1
         self.update_progress()
-        # 只有一組可用的 Key 時，401/403 不會換 Key（沒得換），而是落在每個人的結果上
-        entry = self.cfg.api_keys.get(key) if r.error and r.error.kind == "key" else None
-        if entry and entry.status not in (WARMING, BAD):
-            if self.cfg.api_keys.auth_failed(key, time.time()) == WARMING:  # 剛產生的 Key：生效後再查
-                if self.session.view == ROOM:
-                    self.pending = (self.session.room, False, True)  # 整房重查
-                self.warm_up_key(key)
-            else:  # 全部失效時 update_key_status 會顯示錯誤橫幅；否則下次稽查改用下一組
-                self.on_keys_changed()
+        # 只有一組可用的 Key 時，401/403 不會換 Key（沒得換），而是落在每個人的結果上；剛產生的 Key 生效後整房重查
+        if r.error and r.error.kind == "key":
+            self.apply(self.key_manager.key_failed(key, time.time(), switched=False))
 
     def _clear_banner(self):
         while self.banner.count():
@@ -1438,7 +1400,7 @@ class MainWindow(QMainWindow):
             self.check_game(manual=False)
 
     def check_game(self, manual: bool):
-        key = self.active_key()
+        key = self.key_manager.use()
         puuid = self.cfg.my_puuid(key)  # 觀戰資料的 PUUID 也是這組 Key 的版本，對面要用同一組查
         if not puuid:
             if manual:
@@ -1454,13 +1416,8 @@ class MainWindow(QMainWindow):
                 raise RiotError("not_found", "還沒查到你在這組 Key 的 PUUID，請確認設定裡你的 Riot ID")
             return client.active_game(me), k
 
-        def run():
-            try:
-                game, k = run_rotating(self.rotation, job, on_key_error=self._key_failed_in_audit)
-                self.bridge.game.emit(game, "", manual, k)
-            except RiotError as e:
-                self.bridge.game.emit(None, str(e), manual, key)
-        threading.Thread(target=run, daemon=True).start()
+        self._run_with_key(job, lambda r: self.bridge.game.emit(r[0], "", manual, r[1]),
+                           lambda e: self.bridge.game.emit(None, str(e), manual, key))
 
     def on_game(self, game: dict | None, error: str, manual: bool, key: str):
         if error:

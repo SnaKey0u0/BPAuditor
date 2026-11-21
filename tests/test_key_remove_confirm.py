@@ -1,4 +1,6 @@
-"""設定頁按 ✕ 刪除 API Key 前先確認（#22）：取消就不動，確認才刪。"""
+"""設定頁按 ✕ 刪除 API Key 前先確認（#22）：取消就不動，確認才刪。
+
+刪 Key 時連帶刪掉本人與黑名單在它那個版本的 PUUID，是 key_manager 的規則，見 test_key_manager（不需要 Qt）。"""
 import os
 
 import pytest
