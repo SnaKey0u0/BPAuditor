@@ -14,8 +14,8 @@ def temp_appdata(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_舊設定檔有黑名單_其他設定照常載入_存檔後黑名單消失():
-    """黑名單已移除（#12）。"""
+def test_舊設定檔有舊格式黑名單_其他設定照常載入_舊黑名單捨棄():
+    """v1.4.2 的黑名單只有 PUUID，不搬移（#25：假設大家都是第一次安裝）。"""
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"api_keys": [{"key": K}], "recent_games": 7, "my_puuids": {K: "me-1"},
@@ -25,4 +25,4 @@ def test_舊設定檔有黑名單_其他設定照常載入_存檔後黑名單消
     cfg.save()
 
     assert cfg.recent_games == 7 and cfg.my_puuid(K) == "me-1"
-    assert "blacklist" not in json.loads(path.read_text(encoding="utf-8"))
+    assert json.loads(path.read_text(encoding="utf-8"))["blacklist"] == []
