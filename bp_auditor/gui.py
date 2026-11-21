@@ -10,9 +10,9 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QGuiApplication, QIcon, QPainter, QPainterPath,
-                           QImage, QPen, QPixmap)
+                           QImage, QPen, QPixmap, QTextDocument)
 from PySide6.QtWidgets import (
-    QAbstractButton, QApplication, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QAbstractButton, QApplication, QBoxLayout, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
     QSpacerItem, QStackedWidget, QSystemTrayIcon, QToolTip, QVBoxLayout, QWidget,
 )
@@ -69,6 +69,12 @@ def wr_color(rate: float) -> str:
 
 def grey(text: str) -> str:
     return f"<span style='color:{GREY}'>{text}</span>"
+
+
+def natural_width(label: QLabel) -> int:
+    """QLabel 的 rich text 排成一行、不換行時的寬度（px）。"""
+    doc = QTextDocument(); doc.setDocumentMargin(0); doc.setDefaultFont(label.font()); doc.setHtml(label.text())
+    return math.ceil(doc.idealWidth())
 
 
 def kda_html(kda: float, kd: float) -> str:
@@ -294,13 +300,13 @@ class PlayerCard(QFrame):
         self.set_stripe(None)
         v = QVBoxLayout(self); v.setContentsMargins(12, 8, 10, 8); v.setSpacing(4)
 
-        head = QHBoxLayout(); head.setSpacing(10)
+        self.head = QBoxLayout(QBoxLayout.LeftToRight); self.head.setSpacing(10)  # 方向見 _fit_head
         self.title = QLabel()
         self.title.setToolTip("在 op.gg 開啟個人頁")
         self.title.linkActivated.connect(lambda _: QDesktopServices.openUrl(QUrl(opgg_profile(self.rid))))
-        self.rank = QLabel(); self.rank.setWordWrap(True)  # 窄卡片時牌位換行，不撐寬卡片
-        head.addWidget(self.title, 0, Qt.AlignTop); head.addWidget(self.rank, 1)
-        v.addLayout(head)
+        self.rank = QLabel(); self.rank.setWordWrap(True)  # 再窄也只在牌位自己那一行換行，不撐寬卡片
+        self.head.addWidget(self.title, 0, Qt.AlignTop); self.head.addWidget(self.rank, 1)
+        v.addLayout(self.head)
 
         mid = QHBoxLayout(); mid.setSpacing(14)
         self.big = QLabel(); self.kda = QLabel()
@@ -327,6 +333,24 @@ class PlayerCard(QFrame):
         self.set_title("")
         self.set_skeleton()
 
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._fit_head()
+
+    def _fit_head(self):
+        """名稱和牌位排得下就同一列；排不下時牌位整行移到名稱下方，名稱也可以換行（不截斷）。"""
+        m = self.layout().contentsMargins()
+        room = self.contentsRect().width() - m.left() - m.right()
+        rank = natural_width(self.rank) if not self.rank.isHidden() and self.rank.text() else 0
+        need = natural_width(self.title) + (self.head.spacing() + rank if rank else 0)
+        side = need <= room
+        if (self.head.direction() == QBoxLayout.LeftToRight) == side and self.title.wordWrap() != side:
+            return
+        self.head.setDirection(QBoxLayout.LeftToRight if side else QBoxLayout.TopToBottom)
+        self.head.setSpacing(10 if side else 2)
+        self.head.setStretchFactor(self.rank, 1 if side else 0)
+        self.title.setWordWrap(not side)
+
     def set_compact(self, on: bool):
         """對局的兩隊畫面：卡片較窄，改用小方塊；同一列兩張卡片等高，多出的空間放在底部。
         房間畫面的卡片維持內容高度（方塊換列時跟著長高），不被拉長。"""
@@ -341,11 +365,13 @@ class PlayerCard(QFrame):
         self.clear_skeleton(); self.tiles.hide(); self.rank.hide(); self.kda.hide()
         self.big.setText(grey("Riot 沒有提供這位玩家的身分，無法查詢"))
         self.hidden = True
+        self._fit_head()
         self.show_champion()
 
     def set_title(self, extra: str = ""):
         self.title.setText(f"<a href='opgg' style='color:#e0e0e0;text-decoration:none'>"
                            f"<b style='font-size:15px'>{self.rid}</b></a> {extra}")
+        self._fit_head()
 
     def mark_me(self):
         self.is_me = True
@@ -394,7 +420,7 @@ class PlayerCard(QFrame):
             return
         self.big.setToolTip("")
         s = r.stats
-        self.set_title(grey(f"Lv {s.level if s.level is not None else '?'}"))
+        self.set_title(grey(f"Lv&nbsp;{s.level if s.level is not None else '?'}"))
         self.show_ranks(r.ranks)
         if s.games:
             self.big.setText(f"<b style='font-size:24px;color:{wr_color(s.win_rate)}'>{round(s.win_rate * 100)}%</b>"
@@ -422,7 +448,7 @@ class PlayerCard(QFrame):
 
     def show_ranks(self, ranks):
         if ranks is None:
-            self.rank.setText(grey("牌位查不到")); self.rank.setToolTip(""); return
+            self.rank.setText(grey("牌位查不到")); self.rank.setToolTip(""); self._fit_head(); return
         parts, tips = [], []
         for q in ("單雙", "彈性"):
             r = ranks.get(q)
@@ -431,6 +457,7 @@ class PlayerCard(QFrame):
                 games = r.wins + r.losses
                 tips.append(f"{q} {r.wins}勝{r.losses}敗" + (f"（{round(r.wins / games * 100)}%）" if games else ""))
         self.rank.setText(" · ".join(parts)); self.rank.setToolTip("\n".join(tips))
+        self._fit_head()
 
     def _tile_tip(self, g: GameSummary) -> str:
         """單場提示框：英雄頭像、K/D/A 與勝敗、英雄與模式、裝備列、主符文與召喚師技能列、時長與死亡速率；
