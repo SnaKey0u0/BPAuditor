@@ -34,8 +34,8 @@ RED, GREEN, GREY, BLUE, ORANGE = "#ef5350", "#66bb6a", "#9e9e9e", "#90caf9", "#f
 SKELETON = "#323844"
 NEON = "#18ffff"  # 戳場的霓虹光暈與標籤
 KEY_RECHECK_MS = 15_000
-GAME_POLL_DELAY_MS = 90_000  # 房間稽查完先等 90 秒（排隊＋選角）才開始問觀戰 API
-GAME_POLL_MS = 20_000  # 之後每 20 秒問一次，看開局了沒
+GAME_POLL_DELAY_MS = 60_000  # 房間稽查完先等 60 秒（排隊＋選角）才開始問觀戰 API
+GAME_POLL_MS = 10_000  # 之後每 10 秒問一次，看開局了沒
 GAME_POLL_FOR = 15 * 60  # 開始問之後最多問這麼久
 GAME_WIDTH = 1100  # 左右兩隊時視窗至少這麼寬
 KDA_GOOD, KD_GOOD = 3, 1  # 平均 KDA／KD 達到這個值顯示綠色，否則紅色
@@ -82,10 +82,12 @@ def keep_together(html: str) -> str:
 
 
 def kda_html(kda: float, kd: float) -> str:
-    """平均 KDA < 3、KD < 1 紅色，否則綠色；兩者同字體大小，上下兩行。"""
-    def line(label: str, value: float, good: float) -> str:
-        return f"{grey(label)} <b style='color:{GREEN if value >= good else RED}'>{value:.2f}</b>"
-    return f"<span style='font-size:15px'>{line('KDA', kda, KDA_GOOD)}<br>{line('KD', kd, KD_GOOD)}</span>"
+    """平均 KDA < 3、KD < 1 紅色，否則綠色；兩者同字體大小，上下兩行，標籤與數值各自對齊成一欄。"""
+    def row(label: str, value: float, good: float) -> str:
+        return (f"<tr><td>{grey(label + ':')}</td>"
+                f"<td style='padding-left:6px'><b style='color:{GREEN if value >= good else RED}'>{value:.2f}</b></td></tr>")
+    return (f"<table cellspacing=0 cellpadding=0 style='font-size:15px'>"
+            f"{row('KDA', kda, KDA_GOOD)}{row('KD', kd, KD_GOOD)}</table>")
 
 
 def resource(name: str) -> Path:
@@ -536,7 +538,7 @@ class KeyList(QWidget):
         self.grid = QGridLayout(); self.grid.setHorizontalSpacing(12); self.grid.setColumnStretch(2, 1)
         v.addLayout(self.grid)
         add = QHBoxLayout()
-        self.input = QLineEdit(); self.input.setPlaceholderText("貼上 RGAPI-… 後按 Enter")
+        self.input = QLineEdit()
         self.input.returnPressed.connect(self.add)
         btn = QPushButton("新增"); btn.setObjectName("secondary"); btn.clicked.connect(self.add)
         add.addWidget(self.input, 1); add.addWidget(btn)
@@ -616,7 +618,9 @@ class SettingsPage(QWidget):
         upd = QPushButton("取得新 Key"); upd.setObjectName("secondary"); upd.clicked.connect(win.start_key_refresh)
         row = QHBoxLayout(); row.addWidget(self.key_state, 1); row.addWidget(upd)
         f.addRow("", row)
-        f.addRow("", QLabel(grey("在 Riot 網站複製 Key 就會自動加入")))
+        link = QLabel(grey(f"在 <a href='{KEY_PAGE}' style='color:{BLUE}'>{KEY_PAGE.split('//')[1]}</a> 複製 Key 將自動新增"))
+        link.setOpenExternalLinks(True)
+        f.addRow("", link)
 
         self.me = QLineEdit(cfg.my_riot_id); self.me.setPlaceholderText("名稱#標籤")
         self.me.editingFinished.connect(self.save_me)
@@ -644,7 +648,7 @@ class SettingsPage(QWidget):
         line = QFrame(); line.setFixedHeight(1); line.setStyleSheet("background:#3a3f4b;")
         sv.addWidget(line)
         sv.addWidget(QLabel(f"<b style='font-size:15px;color:{NEON}'>戳場</b>&nbsp;&nbsp;"
-                            f"{grey('死亡速率 ≥ 門檻　且　KDA ≤ 門檻')}"))
+                            f"{grey('每分鐘死 ≥ 門檻　且　KDA ≤ 門檻')}"))
         sub = QFormLayout(); sub.setContentsMargins(16, 0, 0, 0)
         sv.addLayout(sub)
         f.addRow(section)
@@ -652,14 +656,12 @@ class SettingsPage(QWidget):
         self.poke_rate.setSingleStep(0.05); self.poke_rate.setPrefix("≥ ")
         self.poke_rate.setValue(cfg.poke_deaths_per_minute)
         self.poke_rate.setKeyboardTracking(False); self.poke_rate.valueChanged.connect(self.save_poke)
-        sub.addRow("死亡速率", self.poke_rate)
-        sub.addRow("", QLabel(grey("死亡 ÷ 整局分鐘")))
+        sub.addRow("每分鐘死", self.poke_rate)
         self.poke_kda = QDoubleSpinBox(); self.poke_kda.setRange(0.1, 10); self.poke_kda.setDecimals(2)
         self.poke_kda.setSingleStep(0.1); self.poke_kda.setPrefix("≤ ")
         self.poke_kda.setValue(cfg.poke_kda_at_most)
         self.poke_kda.setKeyboardTracking(False); self.poke_kda.valueChanged.connect(self.save_poke)
         sub.addRow("KDA", self.poke_kda)
-        sub.addRow("", QLabel(grey("（擊殺 + 助攻）÷ 死亡")))
 
     def save_me(self):
         text = self.me.text().strip()
@@ -775,7 +777,7 @@ class MainWindow(QMainWindow):
         opgg = QPushButton("在 op.gg 開啟"); opgg.setObjectName("secondary"); opgg.clicked.connect(self.open_opgg)
         v.addWidget(opgg)
         self.game_btn = QPushButton("查對面"); self.game_btn.setObjectName("secondary")
-        self.game_btn.setToolTip("載入畫面後才查得到；稽查完 90 秒起每 20 秒自動查，手動查過就停")
+        self.game_btn.setToolTip("載入畫面後才查得到；稽查完 60 秒起每 10 秒自動查，手動查過就停")
         self.game_btn.clicked.connect(lambda: self.check_game(manual=True))
         v.addWidget(self.game_btn)
         self.err = QLabel(); self.err.setWordWrap(True); self.err.setStyleSheet(f"color:{RED}")
@@ -1330,7 +1332,7 @@ class MainWindow(QMainWindow):
 
     # ─── 查對面（Riot 觀戰 API，不讀遊戲客戶端） ───
     def start_polling(self):
-        """房間稽查完：等 90 秒後每 20 秒查一次；查到開局或手動查過就停。"""
+        """房間稽查完：等 60 秒後每 10 秒查一次；查到開局或手動查過就停。"""
         if self.cfg.my_puuid(self.active_key()) and not self.poll_timer.isActive():
             self.poll_until = time.monotonic() + GAME_POLL_DELAY_MS / 1000 + GAME_POLL_FOR
             self.poll_timer.start(GAME_POLL_DELAY_MS)
@@ -1352,7 +1354,7 @@ class MainWindow(QMainWindow):
     def poll_game(self):
         if time.monotonic() > self.poll_until:
             self.poll_timer.stop(); return
-        self.poll_timer.setInterval(GAME_POLL_MS)  # 第一次等 90 秒，之後每 20 秒
+        self.poll_timer.setInterval(GAME_POLL_MS)  # 第一次等 60 秒，之後每 10 秒
         if not self.running:
             self.check_game(manual=False)
 
