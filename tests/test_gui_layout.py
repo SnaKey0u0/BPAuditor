@@ -40,13 +40,13 @@ def window(tmp_path, monkeypatch):
     w.cfg.my_riot_id, w.cfg.my_puuids = "我#TW", {K: riot.puuid(K, "我")}
     w.show()
     yield app, w, riot
-    w.poll_timer.stop()
+    w.poll_tick.stop()
     w.hide()
 
 
 def wait_done(app, w, timeout=10):
     t = time.monotonic()
-    while w.running:
+    while w.scheduler.running:
         app.processEvents()
         assert time.monotonic() - t < timeout, "稽查沒有結束"
         time.sleep(0.01)
