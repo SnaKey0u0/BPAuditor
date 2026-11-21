@@ -92,18 +92,18 @@ def test_game_summaries_flag_remake_but_not_normal_surrender():
 
 
 def _feeding(deaths, minutes, *, kills=0, assists=0, remake=False, threshold=None):
-    """單場死亡數與整局時長（分鐘）→ 該場是否為送頭場（門檻未給就用預設每分鐘 0.5）。"""
+    """單場死亡數與整局時長（分鐘）→ 該場是否為送頭場（門檻未給就用預設每分鐘 0.6）。"""
     ms = [match("1", ["a"], ["x"], kda=(kills, deaths, assists), remake=remake, minutes=minutes)]
     args = () if threshold is None else (threshold,)
     return game_summaries("a", ms, *args).pop().feeding
 
 
 def test_feeding_game_when_death_rate_equals_threshold():
-    assert _feeding(10, 20) is True  # 每分鐘 0.5，剛好等於預設門檻
+    assert _feeding(12, 20) is True  # 每分鐘 0.6，剛好等於預設門檻
 
 
 def test_not_feeding_game_when_death_rate_below_threshold():
-    assert _feeding(9, 20) is False  # 每分鐘 0.45
+    assert _feeding(11, 20) is False  # 每分鐘 0.55
 
 
 def test_same_deaths_only_shorter_game_reaches_threshold():
@@ -112,7 +112,7 @@ def test_same_deaths_only_shorter_game_reaches_threshold():
 
 
 def test_high_kda_still_feeding_when_death_rate_reaches_threshold():
-    assert _feeding(10, 20, kills=30, assists=40) is True  # KDA 7、KD 3，KDA／KD 不再影響判定
+    assert _feeding(12, 20, kills=30, assists=40) is True  # KDA 5.8、KD 2.5，KDA／KD 不再影響判定
 
 
 def test_remake_never_a_feeding_game():
@@ -125,14 +125,14 @@ def test_custom_threshold_changes_the_judgement():
 
 
 def test_game_summary_minutes_and_death_rate_from_whole_game_duration():
-    m = match("1", ["a"], ["x"], kda=(2, 9, 4), minutes=18)
+    m = match("1", ["a"], ["x"], kda=(2, 12, 4), minutes=20)
     m["info"]["participants"][0]["timePlayed"] = 300  # 該玩家自己的在線時間不採用
     g = game_summaries("a", [m])[0]
-    assert (g.minutes, g.death_rate, g.feeding) == (18, 0.5, True)
+    assert (g.minutes, g.death_rate, g.feeding) == (20, 0.6, True)
 
 
 def test_pre_11_20_game_duration_in_milliseconds():
-    m = match("1", ["a"], ["x"], kda=(0, 10, 0))
+    m = match("1", ["a"], ["x"], kda=(0, 12, 0))
     m["info"]["gameDuration"] = 20 * 60_000
     del m["info"]["gameEndTimestamp"]
     g = game_summaries("a", [m])[0]

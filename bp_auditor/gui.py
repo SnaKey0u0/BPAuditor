@@ -302,7 +302,7 @@ class PlayerCard(QFrame):
 
         self.head = QBoxLayout(QBoxLayout.LeftToRight); self.head.setSpacing(10)  # 方向見 _fit_head
         self.title = QLabel()
-        self.title.setToolTip("在 op.gg 開啟個人頁")
+        self.title.setToolTip("開啟 op.gg")
         self.title.linkActivated.connect(lambda _: QDesktopServices.openUrl(QUrl(opgg_profile(self.rid))))
         self.rank = QLabel(); self.rank.setWordWrap(True)  # 再窄也只在牌位自己那一行換行，不撐寬卡片
         self.head.addWidget(self.title, 0, Qt.AlignTop); self.head.addWidget(self.rank, 1)
@@ -324,7 +324,6 @@ class PlayerCard(QFrame):
         self.feed_tag = QLabel("送頭"); self.feed_tag.hide()  # 近期戰績有任一場送頭場；排在相遇之前
         self.feed_tag.setStyleSheet(f"background:#12303a;color:{NEON};border:1px solid {NEON};"
                                     "border-radius:10px;padding:2px 9px;")
-        self.feed_tag.setToolTip("有青色霓虹框的那幾場；滑鼠移到方塊上看細節")
         self.tags.addWidget(self.streak); self.tags.addWidget(self.feed_tag)
         self.tags.addWidget(self.chip); self.tags.addStretch()
         v.addLayout(self.tags)
@@ -428,9 +427,11 @@ class PlayerCard(QFrame):
             self.kda.setText(kda_html(s.kda, s.kd))
         else:
             self.big.setText(grey("近期沒有對戰")); self.kda.setText("")
-        games = game_summaries(r.puuid, r.matches, self.win.feeding_threshold())
+        threshold = self.win.feeding_threshold()
+        games = game_summaries(r.puuid, r.matches, threshold)
         self.tiles.set_games(games)  # 全是重開局時統計為空，方塊仍列出
         self.feed_tag.setVisible(any(x.feeding for x in games))
+        self.feed_tag.setToolTip(f"青框場次 ≥ {threshold:.2f} 死/分")
         self.win.prefetch_tip_icons(games)
         if st := streak(games):
             color, bg = (GREEN, "#2e4a3a") if st.win else (RED, "#4a2e2e")
@@ -590,7 +591,7 @@ class SettingsPage(QWidget):
         upd = QPushButton("取得新 Key"); upd.setObjectName("secondary"); upd.clicked.connect(win.start_key_refresh)
         row = QHBoxLayout(); row.addWidget(self.key_state, 1); row.addWidget(upd)
         f.addRow("", row)
-        f.addRow("", QLabel(grey("在網站複製 Key，程式會自動加入清單")))
+        f.addRow("", QLabel(grey("在 Riot 網站複製 Key 就會自動加入")))
 
         self.me = QLineEdit(cfg.my_riot_id); self.me.setPlaceholderText("名稱#標籤")
         self.me.editingFinished.connect(self.save_me)
@@ -612,13 +613,13 @@ class SettingsPage(QWidget):
         f.addRow("開機時啟動", self.boot)
 
         # 送頭場判定：死亡速率（死亡數 ÷ 整局分鐘）≥ 門檻；改了立即存檔並重畫卡片，不重新稽查
-        head = QLabel("<b>送頭場判定</b>"); head.setStyleSheet("padding-top:10px;"); f.addRow(head)
+        head = QLabel("<b>送頭場</b>"); head.setStyleSheet("padding-top:10px;"); f.addRow(head)
         self.feed_rate = QDoubleSpinBox(); self.feed_rate.setRange(0.05, 5); self.feed_rate.setDecimals(2)
-        self.feed_rate.setSingleStep(0.05); self.feed_rate.setSuffix(" 次/分")
+        self.feed_rate.setSingleStep(0.05); self.feed_rate.setSuffix(" 死/分")
         self.feed_rate.setValue(cfg.feeding_deaths_per_minute)
         self.feed_rate.setKeyboardTracking(False); self.feed_rate.valueChanged.connect(self.save_feeding)
-        f.addRow("每分鐘死亡 ≥", self.feed_rate)
-        f.addRow("", QLabel(grey("死亡數 ÷ 整局時長（分鐘）≥ 門檻 → 送頭場")))
+        f.addRow("門檻", self.feed_rate)
+        f.addRow("", QLabel(grey("死亡數 ÷ 整局分鐘數 ≥ 門檻")))
 
     def save_me(self):
         text = self.me.text().strip()
@@ -648,8 +649,8 @@ class SettingsPage(QWidget):
 
     def update_games_hint(self):
         n = self.games.value()
-        self.games_hint.setText(grey(f"5 人房最多約 {4 * n + 15} 次請求，進遊戲查對面再約 {5 * n + 22} 次。"
-                                     "每組 Key 上限每 2 分鐘 100 次。"))
+        self.games_hint.setText(grey(f"稽查約 {4 * n + 15} 次請求、查對面約 {5 * n + 22} 次"
+                                     "（每組 Key 每 2 分鐘限 100 次）"))
 
     def save_autostart(self, on: bool):
         self.win.cfg.autostart = on; self.win.cfg.save()
@@ -734,7 +735,7 @@ class MainWindow(QMainWindow):
         opgg = QPushButton("在 op.gg 開啟"); opgg.setObjectName("secondary"); opgg.clicked.connect(self.open_opgg)
         v.addWidget(opgg)
         self.game_btn = QPushButton("查對面"); self.game_btn.setObjectName("secondary")
-        self.game_btn.setToolTip("進入載入畫面後才查得到。房間稽查完 90 秒後會每 20 秒自動查，手動查過就不再自動查")
+        self.game_btn.setToolTip("載入畫面後才查得到；稽查完 90 秒起每 20 秒自動查，手動查過就停")
         self.game_btn.clicked.connect(lambda: self.check_game(manual=True))
         v.addWidget(self.game_btn)
         self.err = QLabel(); self.err.setWordWrap(True); self.err.setStyleSheet(f"color:{RED}")

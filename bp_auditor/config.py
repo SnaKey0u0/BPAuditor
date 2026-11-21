@@ -39,7 +39,8 @@ class Config:
     @classmethod
     def load(cls) -> "Config":
         try:
-            data = _migrate_puuids(_migrate_keys(json.loads(config_path().read_text(encoding="utf-8"))))
+            data = _migrate_feeding(_migrate_puuids(_migrate_keys(
+                json.loads(config_path().read_text(encoding="utf-8")))))
             return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
         except (OSError, ValueError, TypeError, AttributeError):
             return cls()
@@ -56,6 +57,17 @@ def _migrate_keys(data: dict) -> dict:
     if "api_keys" not in data and str(data.get("api_key", "")).strip():
         data["api_keys"] = [{"key": data["api_key"], "added_at": data.get("key_saved_at", 0.0)}]
     data["api_keys"] = KeyPool.from_json(data.get("api_keys"))
+    return data
+
+
+OLD_FEEDING_DEFAULT = 0.5  # v1.5.0 以前的送頭場門檻預設值
+
+
+def _migrate_feeding(data: dict) -> dict:
+    """門檻存的是舊預設值 0.5：當成沒改過，換成目前的預設值。
+    分不出是不是使用者刻意設成 0.5 的，接受這個副作用（#18）。"""
+    if data.get("feeding_deaths_per_minute") == OLD_FEEDING_DEFAULT:
+        data["feeding_deaths_per_minute"] = FEEDING_DEATHS_PER_MINUTE
     return data
 
 
