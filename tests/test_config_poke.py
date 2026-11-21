@@ -40,30 +40,11 @@ def test_old_config_without_thresholds_loads_defaults():
     assert (cfg.recent_games, *thresholds(cfg)) == (7, 0.6, 1.5)
 
 
-def test_old_feeding_threshold_becomes_poke_death_rate():
-    write_config({"api_key": "k", "feeding_deaths_per_minute": 0.7})
-    assert thresholds(Config.load()) == (0.7, 1.5)
-
-
-def test_stored_old_default_0_5_migrates_to_new_default():
-    write_config({"api_key": "k", "feeding_deaths_per_minute": 0.5})
-    assert Config.load().poke_deaths_per_minute == 0.6
-
-
-def test_stored_custom_old_feeding_threshold_is_kept():
-    write_config({"api_key": "k", "feeding_deaths_per_minute": 0.55})
-    assert Config.load().poke_deaths_per_minute == 0.55
-
-
-def test_new_death_rate_wins_over_old_feeding_threshold():
-    write_config({"api_key": "k", "feeding_deaths_per_minute": 0.7, "poke_deaths_per_minute": 0.8})
-    assert Config.load().poke_deaths_per_minute == 0.8
-
-
-def test_old_kd_threshold_and_feeding_field_are_dropped():
+def test_old_thresholds_are_not_migrated_and_dropped():
+    # 假設大家都是第一次安裝（#24）：舊的送頭場、戳場門檻一律不沿用，照預設值
     p = write_config({"api_key": "k", "feeding_deaths_per_minute": 0.7, "poke_kd_at_most": 0.3})
     cfg = Config.load()
-    assert thresholds(cfg) == (0.7, 1.5)  # 舊的 KD 門檻不轉換成 KDA
+    assert thresholds(cfg) == (0.6, 1.5)
     cfg.save()
     saved = json.loads(p.read_text(encoding="utf-8"))
     assert "poke_kd_at_most" not in saved and "feeding_deaths_per_minute" not in saved
