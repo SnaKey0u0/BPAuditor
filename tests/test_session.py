@@ -1,13 +1,13 @@
 """稽查場次（#15）：房間 → 對局「要查誰、沿用誰」，以及換 Key 時整次重跑（ADR 0002）。
 
-用假的傳輸層（tests.test_request_count.FakeRiot）走真的 RiotClient，不碰 Qt。
+用共用的假 Riot（tests.fakes.FakeRiot，PUUID 依 Key 而不同）走真的 RiotClient，不碰 Qt。
 """
 from bp_auditor.audit import ME
 from bp_auditor.keys import BAD, WARMUP, WARMING, KeyPool
 from bp_auditor.parsing import RiotId
-from bp_auditor.riot import RateLimiter, RiotClient
 from bp_auditor.session import GAME, AuditSession, Listener, card_key
-from tests.test_request_count import ENEMIES, GAMES, ROOM as ROOM_NAMES, FakeRiot
+from tests.fakes import puuid
+from tests.test_request_count import ENEMIES, GAMES, ROOM as ROOM_NAMES, world
 
 K1, K2 = "RGAPI-1", "RGAPI-2"
 ME_RID = RiotId("我", "TW")
@@ -27,15 +27,11 @@ class Recorder:
                         lambda k, n: self.restarts.append((k, n)))
 
 
-def client(riot):
-    return RiotClient("RGAPI-test", RateLimiter(limits=((10 ** 6, 1.0),)), fetch=riot.fetch)
-
-
 def run(session, riot, query, key, **game):
     """像 GUI 一樣：request → job（用 key 跑）→ finished。"""
     rec = Recorder()
-    req = session.request(query, key, games=GAMES, me_riot_id=ME_RID, my_puuids={K1: "p-我", K2: "p-我"}, **game)
-    req.job(rec.listener())(key, client(riot))
+    req = session.request(query, key, games=GAMES, me_riot_id=ME_RID, my_puuids={K1: puuid(K1, "我"), K2: puuid(K2, "我")}, **game)
+    req.job(rec.listener())(key, riot.client(key))
     session.finished(rec.outcome)
     return rec
 
@@ -46,26 +42,24 @@ def room_audit(session, riot, names, key=K1, force=False):
     return plan, run(session, riot, plan.query, key)
 
 
-def spectator(allies, enemies, hidden_enemy=False):
-    ps = [{"puuid": "p-" + n, "riotId": f"{n}#TW", "teamId": 100, "championId": 103} for n in allies]
-    ps += [{"puuid": "p-" + n, "riotId": f"{n}#TW", "teamId": 200, "championId": 1} for n in enemies]
-    if hidden_enemy:
-        ps.append({"puuid": None, "riotId": "Ahri", "teamId": 200, "championId": 103})
-    return {"gameId": 42, "participants": ps}
+def spectator(riot, key, allies, enemies, hidden_enemy=False):
+    """riot 有一場進行中的對局；回觀戰 API 用 key 查到的資料（PUUID 是 key 的版本）。"""
+    riot.start_game(allies, enemies, hidden_enemy=hidden_enemy)
+    return riot.active_game(key)
 
 
 # ─── 房間 ───
 
 def test_房間第一次全部查_名單沒變不重查():
     s = AuditSession()
-    plan, _ = room_audit(s, FakeRiot(), ["我", "A", "B"])
+    plan, _ = room_audit(s, world(), ["我", "A", "B"])
 
     assert plan.change == "new" and plan.query == [ME_RID, rid("A"), rid("B")]
     assert s.plan_room([rid("我"), rid("a"), rid("B")], K1) is None  # 不分大小寫
 
 
 def test_房間多了新人只查新人_近期戰績沿用():
-    s, riot = AuditSession(), FakeRiot()
+    s, riot = AuditSession(), world()
     room_audit(s, riot, ["我", "A"])
 
     plan, rec = room_audit(s, riot, ["我", "A", "B"])
@@ -77,7 +71,7 @@ def test_房間多了新人只查新人_近期戰績沿用():
 
 def test_有人離開_拿掉他的近期戰績_不用查():
     s = AuditSession()
-    room_audit(s, FakeRiot(), ["我", "A", "B"])
+    room_audit(s, world(), ["我", "A", "B"])
 
     plan = s.plan_room([rid("我"), rid("A")], K1)
     s.enter_room(plan)
@@ -88,7 +82,7 @@ def test_有人離開_拿掉他的近期戰績_不用查():
 
 def test_使用中的Key換了_整房重查_舊結果不沿用():
     s = AuditSession()
-    room_audit(s, FakeRiot(), ["我", "A"])
+    room_audit(s, world(), ["我", "A"])
 
     plan = s.plan_room([rid("我"), rid("A"), rid("B")], K2)
     s.enter_room(plan)
@@ -108,11 +102,11 @@ def test_身分被隱藏的人有卡片但不查():
 # ─── 對局 ───
 
 def test_查對面_我方房間成員沿用_只查對面與路人():
-    s, riot = AuditSession(), FakeRiot()
+    s, riot = AuditSession(), world()
     room_audit(s, riot, ROOM_NAMES[:4])  # D 不在房間：是路人
     cards = {card_key(rid(n)) for n in ROOM_NAMES[:4]}
 
-    plan = s.plan_game(spectator(ROOM_NAMES, ENEMIES, hidden_enemy=True), K1, "p-我", cards)
+    plan = s.plan_game(spectator(riot, K1, ROOM_NAMES, ENEMIES, hidden_enemy=True), K1, puuid(K1, "我"), cards)
 
     assert [x.rid for x in plan.seats if x.reused] == [ME_RID, rid("A"), rid("B"), rid("C")]
     assert plan.query == [rid("D")] + [rid(n) for n in ENEMIES]
@@ -128,11 +122,11 @@ def test_查對面_我方房間成員沿用_只查對面與路人():
 
 
 def test_查到對局的Key與房間階段不同_我方不沿用():
-    s, riot = AuditSession(), FakeRiot()
+    s, riot = AuditSession(), world()
     room_audit(s, riot, ROOM_NAMES)
     cards = {card_key(rid(n)) for n in ROOM_NAMES}
 
-    plan = s.plan_game(spectator(ROOM_NAMES, ENEMIES), K2, "p-我", cards)
+    plan = s.plan_game(spectator(riot, K2, ROOM_NAMES, ENEMIES), K2, puuid(K2, "我"), cards)
     s.enter_game(plan, K2)
 
     assert not any(x.reused for x in plan.seats)
@@ -140,42 +134,42 @@ def test_查到對局的Key與房間階段不同_我方不沿用():
 
 
 def test_畫面上已沒有卡片的人不沿用():
-    s, riot = AuditSession(), FakeRiot()
+    s, riot = AuditSession(), world()
     room_audit(s, riot, ROOM_NAMES)
 
-    plan = s.plan_game(spectator(ROOM_NAMES, ENEMIES), K1, "p-我", cards={card_key(ME_RID)})
+    plan = s.plan_game(spectator(riot, K1, ROOM_NAMES, ENEMIES), K1, puuid(K1, "我"), cards={card_key(ME_RID)})
 
     assert [x.rid for x in plan.seats if x.reused] == [ME_RID]
 
 
 def test_本人改名_對局中用房間裡那張本人卡片():
     """房間裡以新名字出現、查完才知道是本人（me_card）；觀戰資料寫的是另一種大小寫也對得上。"""
-    s, riot = AuditSession(), FakeRiot()
+    s, riot = AuditSession(), world()
     room_audit(s, riot, ROOM_NAMES)
     s.me_card = card_key(ME_RID)
-    game = spectator(ROOM_NAMES, ENEMIES)
+    game = spectator(riot, K1, ROOM_NAMES, ENEMIES)
     game["participants"][0]["riotId"] = "別的寫法#tw"
 
-    plan = s.plan_game(game, K1, "p-我", {card_key(rid(n)) for n in ROOM_NAMES})
+    plan = s.plan_game(game, K1, puuid(K1, "我"), {card_key(rid(n)) for n in ROOM_NAMES})
 
     assert plan.seats[0].rid == ME_RID and plan.seats[0].reused
 
 
 def test_對局資料裡找不到本人():
-    assert AuditSession().plan_game(spectator(["A"], ["E1"]), K1, "p-我") is None
+    assert AuditSession().plan_game(spectator(world(), K1, ["A"], ["E1"]), K1, puuid(K1, "我")) is None
 
 
 # ─── 換 Key 重跑 ───
 
 def test_換Key重跑_每個人都用新Key重查_不沿用舊結果():
-    s, riot = AuditSession(), FakeRiot()
+    s, riot = AuditSession(), world()
     room_audit(s, riot, ["我", "A"])
     plan = s.plan_room([rid("我"), rid("A"), rid("B")], K1)
     s.enter_room(plan)
     rec = Recorder()
 
-    job = s.request(plan.query, K1, games=GAMES, me_riot_id=ME_RID, my_puuids={K2: "p-我"}).job(rec.listener())
-    job(K2, client(riot))  # run_rotating 換到 K2 重跑
+    job = s.request(plan.query, K1, games=GAMES, me_riot_id=ME_RID, my_puuids={K2: puuid(K2, "我")}).job(rec.listener())
+    job(K2, riot.client(K2))  # run_rotating 換到 K2 重跑
 
     assert rec.restarts == [(K2, 3)]
     assert sorted(str(r.riot_id) for r, k in rec.players) == ["A#TW", "B#TW", "我#TW"]
@@ -183,25 +177,49 @@ def test_換Key重跑_每個人都用新Key重查_不沿用舊結果():
 
 
 def test_查對面換Key重跑_用新Key重查一次對局取得PUUID():
-    s, riot = AuditSession(), FakeRiot()
-    riot.game = spectator(ROOM_NAMES, ENEMIES)
-    plan = s.plan_game(riot.game, K1, "p-我")
+    s, riot = AuditSession(), world()
+    plan = s.plan_game(spectator(riot, K1, ROOM_NAMES, ENEMIES), K1, puuid(K1, "我"))
     s.enter_game(plan, K1)
     rec = Recorder()
 
-    job = s.request(plan.query, K1, games=GAMES, me_riot_id=ME_RID, my_puuids={K2: "p-我"},
+    job = s.request(plan.query, K1, games=GAMES, me_riot_id=ME_RID, my_puuids={K2: puuid(K2, "我")},
                     puuids=plan.puuids, champions=plan.champions, sides=plan.sides).job(rec.listener())
-    riot.urls.clear()
-    job(K2, client(riot))
+    riot.clear()
+    job(K2, riot.client(K2))
 
-    assert sum(n for u, n in riot.urls.items() if "/spectator/" in u) == 1
-    assert not [u for u in riot.urls if "/by-riot-id/" in u]  # PUUID 都從重查的對局拿到
+    assert riot.count("/spectator/", key=K2) == 1
+    assert riot.count("/by-riot-id/") == 0  # PUUID 都從重查的對局拿到
+    assert riot.count(key=K1) == 0
     assert len(rec.players) == 10
+    assert {p.puuid for p, _ in rec.players} == {puuid(K2, n) for n in ROOM_NAMES + ENEMIES}  # 全是 K2 的版本
+
+
+def test_整次重跑的請求數估計_人數乘近期場數加3_查對面加1_而且是上限():
+    """換 Key 前用來確認目標 Key 的額度夠不夠（#33）：實際重跑的請求數不會超過估計。"""
+    s, riot = AuditSession(), world()
+    room_audit(s, riot, ["我", "A"])
+    plan = s.plan_room([rid("我"), rid("A"), rid("B")], K1)
+    s.enter_room(plan)
+    req = s.request(plan.query, K1, games=GAMES, me_riot_id=ME_RID, my_puuids={K2: puuid(K2, "我")})
+    assert req.rerun_cost == 3 * (GAMES + 3)
+    riot.clear()
+    req.job(Recorder().listener())(K2, riot.client(K2))
+    assert riot.total <= req.rerun_cost
+
+    s, riot = AuditSession(), world()
+    plan = s.plan_game(spectator(riot, K1, ROOM_NAMES, ENEMIES), K1, puuid(K1, "我"))
+    s.enter_game(plan, K1)
+    req = s.request(plan.query, K1, games=GAMES, me_riot_id=ME_RID, my_puuids={K2: puuid(K2, "我")},
+                    puuids=plan.puuids, champions=plan.champions, sides=plan.sides)
+    assert req.rerun_cost == 10 * (GAMES + 3) + 1
+    riot.clear()
+    req.job(Recorder().listener())(K2, riot.client(K2))
+    assert riot.total <= req.rerun_cost
 
 
 def test_換Key了_舊Key的近期戰績丟掉():
     s = AuditSession()
-    room_audit(s, FakeRiot(), ["我", "A"])
+    room_audit(s, world(), ["我", "A"])
 
     s.restarted(K2)
 
