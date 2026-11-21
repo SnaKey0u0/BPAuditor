@@ -92,13 +92,13 @@ def test_game_summaries_flag_remake_but_not_normal_surrender():
 
 
 def _poke(kills, deaths, assists, minutes=20, *, remake=False, **thresholds):
-    """單場 K/D/A 與整局時長（分鐘）→ 該場是否為戳場（門檻未給就用預設：每分鐘死亡 ≥ 0.6、KDA ≤ 1.5）。"""
+    """單場 K/D/A 與整局時長（分鐘）→ 該場是否為戳場（門檻未給就用預設：每分鐘死亡 ≥ 0.6、KDA ≤ 2.0）。"""
     ms = [match("1", ["a"], ["x"], kda=(kills, deaths, assists), remake=remake, minutes=minutes)]
     return game_summaries("a", ms, **thresholds).pop().poke
 
 
 def test_poke_game_when_both_equal_thresholds():
-    assert _poke(6, 12, 12) is True  # 每分鐘 0.6、KDA 1.5，兩個都剛好等於預設門檻
+    assert _poke(12, 12, 12) is True  # 每分鐘 0.6、KDA 2.0，兩個都剛好等於預設門檻
 
 
 def test_not_poke_when_death_rate_below_threshold():
@@ -106,7 +106,7 @@ def test_not_poke_when_death_rate_below_threshold():
 
 
 def test_not_poke_when_kda_above_threshold():
-    assert _poke(6, 12, 13) is False  # 每分鐘 0.6，但 KDA 1.58
+    assert _poke(12, 12, 13) is False  # 每分鐘 0.6，但 KDA 2.08
 
 
 def test_same_deaths_only_shorter_game_reaches_death_rate():

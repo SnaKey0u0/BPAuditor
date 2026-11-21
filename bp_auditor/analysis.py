@@ -96,9 +96,9 @@ class GameSummary:
         return death_rate(self.deaths, self.minutes)
 
 
-# 戳場門檻的預設值：死亡速率 ≥ 每分鐘 0.6 次，且單場 KDA ≤ 1.5（以真實 ARAM 對戰抽樣訂定，見 #21）
+# 戳場門檻的預設值：死亡速率 ≥ 每分鐘 0.6 次，且單場 KDA ≤ 2.0（抽樣見 #21；KDA 依使用者實測改為 2.0，#26）
 POKE_DEATHS_PER_MINUTE = 0.6
-POKE_KDA_AT_MOST = 1.5
+POKE_KDA_AT_MOST = 2.0
 
 
 def game_minutes(match: dict) -> float:
