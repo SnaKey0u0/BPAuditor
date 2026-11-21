@@ -50,7 +50,8 @@ def test_flag_adds_and_removes_and_saves(win):
 def test_blacklisted_player_recognised_under_new_key_by_riot_id(win):
     card(win, "壞人", "p1", K1).flag.click()
     c = card(win, "壞人", "q1", K2)  # 換了 Key：PUUID 不同，以 Riot ID 認出
-    assert c.blacklisted and c.black_tag.isVisibleTo(c) and c.flag.isChecked()  # 補齊與存檔的規則見 test_blacklist.py
+    assert c.blacklisted and c.black_tag.isVisibleTo(c) and c.flag.isChecked()  # 補齊的規則見 test_blacklist.py
+    assert Config.load().blacklist.to_json()[0]["puuids"] == {K1: "p1", K2: "q1"}  # 視窗依 Match.changed 存了檔
 
 
 def test_flag_disabled_without_puuid_and_hidden_for_me(win):
