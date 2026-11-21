@@ -157,7 +157,7 @@ class ChampionTiles(QWidget):
     """近期戰績的英雄頭像方塊：由新到舊，底部綠／紅條表示該場勝敗；每場有各自的提示框。
 
     5 場一組、組間留較大的間隔，寬度不夠就整組換列（排法見 tiles.grid）；方塊列不會把卡片撐寬。
-    四周留 MARGIN 邊距，送頭場的光暈畫在這裡。
+    四周留 MARGIN 邊距，送頭場與戳場的光暈畫在這裡。
     """
     MARGIN = 6
     PLACEHOLDER = 5  # 查詢中顯示幾個灰色佔位方塊
@@ -237,9 +237,10 @@ class ChampionTiles(QWidget):
         s, radius = self.tile, 4 if self.tile >= 32 else 3
         bar = max(s // 7, 3)  # 底部勝敗色條的高度
         self.rects = [QRectF(x, y, s, s) for x, y in self._cells(self.width())]
-        feeding = [r for r, g in zip(self.rects, self.games or []) if g.feeding]
-        for r in feeding:  # 光暈先畫，相鄰方塊再蓋上去，光暈只留在間隙與邊距裡
-            self._glow(p, r, radius)
+        # 標示：送頭場青色、戳場紅色；兩者皆是時光暈紅色、外框青色
+        marked = [(r, g) for r, g in zip(self.rects, self.games or []) if g.feeding or g.poke]
+        for r, g in marked:  # 光暈先畫，相鄰方塊再蓋上去，光暈只留在間隙與邊距裡
+            self._glow(p, r, radius, RED if g.poke else NEON)
         for i, r in enumerate(self.rects):
             if self.games is None:
                 p.setBrush(QColor(SKELETON)); p.drawRoundedRect(r, radius, radius)
@@ -258,13 +259,14 @@ class ChampionTiles(QWidget):
                 p.fillRect(r, QColor(27, 30, 36, 110))
             p.fillRect(QRectF(r.left(), r.bottom() - bar, s, bar), QColor(GREY if g.remake else GREEN if g.win else RED))
             p.restore()
-        p.setPen(QPen(QColor(NEON), 1.5)); p.setBrush(Qt.NoBrush)
-        for r in feeding:  # 送頭場的實線外框，緊貼方塊外緣
+        p.setBrush(Qt.NoBrush)
+        for r, g in marked:  # 實線外框，緊貼方塊外緣
+            p.setPen(QPen(QColor(NEON if g.feeding else RED), 1.5))
             p.drawRoundedRect(r.adjusted(-0.75, -0.75, 0.75, 0.75), radius + 0.75, radius + 0.75)
 
-    def _glow(self, p: QPainter, r: QRectF, radius: float):
-        """送頭場的靜態青色光暈：由外而內 5 層，越內層越不透明；最外層剛好到 MARGIN 邊距。"""
-        c = QColor(NEON)
+    def _glow(self, p: QPainter, r: QRectF, radius: float, color: str):
+        """靜態光暈：由外而內 5 層，越內層越不透明；最外層剛好到 MARGIN 邊距。"""
+        c = QColor(color)
         for grow, alpha in ((6, 18), (5, 26), (4, 38), (3, 55), (2, 80)):
             c.setAlpha(alpha); p.setBrush(c)
             p.drawRoundedRect(r.adjusted(-grow, -grow, grow, grow), radius + grow, radius + grow)
@@ -324,7 +326,10 @@ class PlayerCard(QFrame):
         self.feed_tag = QLabel("送頭"); self.feed_tag.hide()  # 近期戰績有任一場送頭場；排在相遇之前
         self.feed_tag.setStyleSheet(f"background:#12303a;color:{NEON};border:1px solid {NEON};"
                                     "border-radius:10px;padding:2px 9px;")
-        self.tags.addWidget(self.streak); self.tags.addWidget(self.feed_tag)
+        self.poke_tag = QLabel("戳"); self.poke_tag.hide()  # 近期戰績有任一場戳場；排在送頭之後
+        self.poke_tag.setStyleSheet(f"background:#3a1e22;color:{RED};border:1px solid {RED};"
+                                    "border-radius:10px;padding:2px 9px;")
+        self.tags.addWidget(self.streak); self.tags.addWidget(self.feed_tag); self.tags.addWidget(self.poke_tag)
         self.tags.addWidget(self.chip); self.tags.addStretch()
         v.addLayout(self.tags)
         self.bottom = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Minimum)
@@ -390,7 +395,7 @@ class PlayerCard(QFrame):
         self.result = None
         self.mastery, self.mastery_loaded = None, False
         self.big.setText(""); self.big.setToolTip(""); self.kda.setText(""); self.rank.setText("")
-        for w in (self.streak, self.feed_tag, self.chip):
+        for w in (self.streak, self.feed_tag, self.poke_tag, self.chip):
             w.hide()
         self.set_title("")
         self.set_skeleton()
@@ -408,6 +413,7 @@ class PlayerCard(QFrame):
         self.tiles.set_games([])
         self.streak.hide()
         self.feed_tag.hide()
+        self.poke_tag.hide()
         self.show_champion()
         if r.error:
             if r.error.kind == "key":
@@ -427,11 +433,13 @@ class PlayerCard(QFrame):
             self.kda.setText(kda_html(s.kda, s.kd))
         else:
             self.big.setText(grey("近期沒有對戰")); self.kda.setText("")
-        threshold = self.win.feeding_threshold()
-        games = game_summaries(r.puuid, r.matches, threshold)
+        threshold, poke = self.win.feeding_threshold(), self.win.poke_threshold()
+        games = game_summaries(r.puuid, r.matches, threshold, poke)
         self.tiles.set_games(games)  # 全是重開局時統計為空，方塊仍列出
         self.feed_tag.setVisible(any(x.feeding for x in games))
         self.feed_tag.setToolTip(f"青框場次 ≥ {threshold:.2f} 死/分")
+        self.poke_tag.setVisible(any(x.poke for x in games))
+        self.poke_tag.setToolTip(f"紅框場次 KD ≤ {poke:.2f}")
         self.win.prefetch_tip_icons(games)
         if st := streak(games):
             color, bg = (GREEN, "#2e4a3a") if st.win else (RED, "#4a2e2e")
@@ -621,6 +629,15 @@ class SettingsPage(QWidget):
         f.addRow("門檻", self.feed_rate)
         f.addRow("", QLabel(grey("死亡數 ÷ 整局分鐘數 ≥ 門檻")))
 
+        # 戳場判定：單場 KD ≤ 門檻（0 死不算）；同樣改了立即存檔並重畫卡片
+        head = QLabel("<b>戳場</b>"); head.setStyleSheet("padding-top:10px;"); f.addRow(head)
+        self.poke_kd = QDoubleSpinBox(); self.poke_kd.setRange(0.05, 5); self.poke_kd.setDecimals(2)
+        self.poke_kd.setSingleStep(0.05); self.poke_kd.setSuffix(" KD")
+        self.poke_kd.setValue(cfg.poke_kd_at_most)
+        self.poke_kd.setKeyboardTracking(False); self.poke_kd.valueChanged.connect(self.save_poke)
+        f.addRow("門檻", self.poke_kd)
+        f.addRow("", QLabel(grey("擊殺 ÷ 死亡 ≤ 門檻")))
+
     def save_me(self):
         text = self.me.text().strip()
         cfg = self.win.cfg
@@ -661,6 +678,11 @@ class SettingsPage(QWidget):
         cfg.feeding_deaths_per_minute = self.feed_rate.value()
         cfg.save()
         self.win.refresh_cards()  # 用記憶體裡的對戰重算，不發 Riot API 請求
+
+    def save_poke(self):
+        self.win.cfg.poke_kd_at_most = self.poke_kd.value()
+        self.win.cfg.save()
+        self.win.refresh_cards()
 
 
 class MainWindow(QMainWindow):
@@ -993,6 +1015,10 @@ class MainWindow(QMainWindow):
     def feeding_threshold(self) -> float:
         """設定頁的送頭場門檻：每分鐘死亡次數。"""
         return self.cfg.feeding_deaths_per_minute
+
+    def poke_threshold(self) -> float:
+        """設定頁的戳場門檻：單場 KD。"""
+        return self.cfg.poke_kd_at_most
 
     def icon_html(self, champion_id: str, size: int) -> str:
         """英雄頭像的 <img>；還沒下載好時是空字串。"""

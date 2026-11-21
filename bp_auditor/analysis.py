@@ -79,6 +79,7 @@ class GameSummary:
     keystone: int | None = None                     # 主符文 id；該模式沒有符文時為 None
     spells: list[int] = field(default_factory=list)  # 兩個召喚師技能的數字 key
     feeding: bool = False  # 送頭場：方塊加青色霓虹框
+    poke: bool = False     # 戳場：方塊加紅色光暈
     minutes: float = 0.0   # 整局時長（分鐘），不是該玩家自己的在線時間
 
     @property
@@ -97,6 +98,7 @@ class GameSummary:
 
 
 FEEDING_DEATHS_PER_MINUTE = 0.6  # 送頭場門檻的預設值：死亡速率 ≥ 每分鐘 0.6 次
+POKE_KD_AT_MOST = 0.5            # 戳場門檻的預設值：單場 KD ≤ 0.5
 
 
 def game_minutes(match: dict) -> float:
@@ -116,6 +118,13 @@ def is_feeding(p: dict, minutes: float, threshold: float = FEEDING_DEATHS_PER_MI
     if is_remake(p):
         return False
     return death_rate(p["deaths"], minutes) >= threshold
+
+
+def is_poke(p: dict, threshold: float = POKE_KD_AT_MOST) -> bool:
+    """戳場：該玩家這一場的 KD（擊殺 ÷ 死亡）≤ 門檻（所有模式共用）；沒死過或重開局都不算。"""
+    if is_remake(p) or p["deaths"] == 0:
+        return False
+    return p["kills"] / p["deaths"] <= threshold
 
 
 def _mode(match: dict) -> str:
@@ -138,11 +147,14 @@ def _spells(p: dict) -> list[int]:
 
 
 def game_summaries(puuid: str, matches: list[dict],
-                   feeding_threshold: float = FEEDING_DEATHS_PER_MINUTE) -> list[GameSummary]:
-    """近期戰績的每一場 → 單場摘要，新 → 舊；玩家不在的對戰略過。feeding_threshold：送頭場的死亡速率門檻（次/分）。"""
+                   feeding_threshold: float = FEEDING_DEATHS_PER_MINUTE,
+                   poke_threshold: float = POKE_KD_AT_MOST) -> list[GameSummary]:
+    """近期戰績的每一場 → 單場摘要，新 → 舊；玩家不在的對戰略過。
+    feeding_threshold：送頭場的死亡速率門檻（死/分）；poke_threshold：戳場的 KD 門檻。"""
     return [GameSummary(p["win"], p["championName"], p["kills"], p["deaths"], p["assists"], _mode(m),
                         remake=is_remake(p), items=_items(p), keystone=_keystone(p), spells=_spells(p),
-                        feeding=is_feeding(p, game_minutes(m), feeding_threshold), minutes=game_minutes(m))
+                        feeding=is_feeding(p, game_minutes(m), feeding_threshold),
+                        poke=is_poke(p, poke_threshold), minutes=game_minutes(m))
             for m in matches if (p := participant(m, puuid))]
 
 

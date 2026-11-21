@@ -124,6 +124,36 @@ def test_custom_threshold_changes_the_judgement():
     assert _feeding(6, 20, threshold=0.3) is True
 
 
+def _poke(kills, deaths, *, remake=False, threshold=None):
+    """單場擊殺／死亡 → 該場是否為戳場（門檻未給就用預設 KD ≤ 0.5）。"""
+    ms = [match("1", ["a"], ["x"], kda=(kills, deaths, 3), remake=remake)]
+    kw = {} if threshold is None else {"poke_threshold": threshold}
+    return game_summaries("a", ms, **kw).pop().poke
+
+
+def test_poke_game_when_kd_equals_threshold():
+    assert _poke(3, 6) is True   # KD 0.5，剛好等於預設門檻
+    assert _poke(4, 6) is False  # KD 0.67
+
+
+def test_no_death_never_a_poke_game():
+    assert _poke(0, 0) is False  # 0/0/3：沒死過就不算戳場
+
+
+def test_remake_never_a_poke_game():
+    assert _poke(0, 2, remake=True) is False
+
+
+def test_custom_poke_threshold():
+    assert _poke(3, 6, threshold=0.4) is False
+    assert _poke(4, 6, threshold=1.0) is True
+
+
+def test_feeding_and_poke_judged_separately():
+    g = game_summaries("a", [match("1", ["a"], ["x"], kda=(1, 14, 3), minutes=20)])[0]
+    assert (g.feeding, g.poke) == (True, True)
+
+
 def test_game_summary_minutes_and_death_rate_from_whole_game_duration():
     m = match("1", ["a"], ["x"], kda=(2, 12, 4), minutes=20)
     m["info"]["participants"][0]["timePlayed"] = 300  # 該玩家自己的在線時間不採用

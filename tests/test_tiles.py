@@ -61,13 +61,13 @@ def g(**kw):
 
 
 def test_stats_line_shows_length_and_death_rate():
-    assert stats_line(g()) == "時長 18:32 · 0.27 死/分"
+    assert stats_line(g()) == "時長 18:32 · 0.27 死/分 · KD 0.20"
 
 
 def test_stats_line_for_remake_is_shown_as_is():
-    assert stats_line(g(remake=True, deaths=1, minutes=3 + 12 / 60)) == "時長 3:12 · 0.31 死/分"
+    assert stats_line(g(remake=True, deaths=1, minutes=3 + 12 / 60)) == "時長 3:12 · 0.31 死/分 · KD 1.00"
 
 
 def test_stats_line_long_game_and_zero_length():
-    assert stats_line(g(minutes=65.5)) == "時長 65:30 · 0.08 死/分"
-    assert stats_line(g(minutes=0)) == "時長 0:00 · 0.00 死/分"
+    assert stats_line(g(minutes=65.5)) == "時長 65:30 · 0.08 死/分 · KD 0.20"
+    assert stats_line(g(minutes=0, kills=3, deaths=0)) == "時長 0:00 · 0.00 死/分 · KD 3.00"  # 0 死以 1 計

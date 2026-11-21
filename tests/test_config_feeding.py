@@ -47,6 +47,20 @@ def test_stored_custom_threshold_is_kept():
     assert Config.load().feeding_deaths_per_minute == 0.55
 
 
+def test_poke_threshold_default_and_survives_save_and_reload():
+    assert Config().poke_kd_at_most == 0.5
+    cfg = Config()
+    cfg.poke_kd_at_most = 0.35
+    cfg.save()
+    assert Config.load().poke_kd_at_most == 0.35
+
+
+def test_old_config_without_poke_threshold_loads_default():
+    write_config({"api_key": "k", "feeding_deaths_per_minute": 0.7})
+    cfg = Config.load()
+    assert (cfg.feeding_deaths_per_minute, cfg.poke_kd_at_most) == (0.7, 0.5)
+
+
 def test_old_config_with_only_the_three_old_thresholds_loads_default():
     p = config_path()
     p.parent.mkdir(parents=True)
