@@ -1007,11 +1007,10 @@ class MainWindow(QMainWindow):
 
     def is_blacklisted(self, key: str, puuid: str, riot_id: str) -> bool:
         """比對黑名單；比對時補齊了這組 Key 的 PUUID 或新的 Riot ID 就存檔（#25）。"""
-        before = self.cfg.blacklist.to_json()
-        hit = self.cfg.blacklist.check(key, puuid, riot_id)
-        if self.cfg.blacklist.to_json() != before:
+        match = self.cfg.blacklist.check(key, puuid, riot_id)
+        if match.changed:
             self.cfg.save()
-        return hit
+        return match.listed
 
     def toggle_blacklist(self, key: str, puuid: str, riot_id: str):
         self.cfg.blacklist.toggle(key, puuid, riot_id)

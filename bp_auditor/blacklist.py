@@ -17,6 +17,13 @@ class Entry:
     puuids: dict[str, str] = field(default_factory=dict)  # Key → 該 Key 加密的 PUUID
 
 
+@dataclass(frozen=True)
+class Match:
+    """Blacklist.check 的回報。"""
+    listed: bool   # 在不在黑名單
+    changed: bool  # 比對時有沒有補齊這組 Key 的 PUUID 或更新 Riot ID（有就該存檔）
+
+
 def _same_name(a: str, b: str) -> bool:
     return a.casefold() == b.casefold()
 
@@ -34,12 +41,16 @@ class Blacklist:
                 return e
         return None
 
-    def check(self, key: str, puuid: str, riot_id: str) -> bool:
-        """這個人（puuid 出自 key）在不在黑名單；比對到就順手補齊這組 Key 的 PUUID 與目前的 Riot ID。"""
+    def check(self, key: str, puuid: str, riot_id: str) -> Match:
+        """這個人（puuid 出自 key）在不在黑名單；比對到就順手補齊這組 Key 的 PUUID 與目前的 Riot ID。
+
+        回報裡的 changed 說明有沒有補齊或改動資料，呼叫端據此決定要不要存檔。
+        """
         if not (e := self._find(key, puuid, riot_id)):
-            return False
+            return Match(listed=False, changed=False)
+        changed = e.puuids.get(key) != puuid or e.riot_id != riot_id
         e.puuids[key], e.riot_id = puuid, riot_id
-        return True
+        return Match(listed=True, changed=changed)
 
     def toggle(self, key: str, puuid: str, riot_id: str) -> bool:
         """在黑名單就移除、不在就加入；回傳切換後是否在黑名單。"""
