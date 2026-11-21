@@ -24,7 +24,9 @@
 ```powershell
 py -3.11 -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
+git config core.hooksPath .githooks        # commit 前跑 ruff、merge 前跑 ruff + pytest
 .venv\Scripts\python -m pytest            # 測試
+bash tools/check.sh                       # ruff + pytest（hook 與 CI 跑的就是這個）
 .venv\Scripts\python run.py               # 執行
 .venv\Scripts\python tools\make_icon.py   # 重新產生 assets\icon.ico 與 icon.png
 build.bat                                 # 打包到 dist\，可直接雙擊（PATH 只留系統目錄，避免打包到 Anaconda 的 icuuc.dll）
