@@ -4,7 +4,7 @@ import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from .analysis import FEEDING_DEATHS_PER_MINUTE, POKE_KD_AT_MOST
+from .analysis import POKE_DEATHS_PER_MINUTE, POKE_KDA_AT_MOST
 from .keys import KeyPool
 from .puuids import Versions
 
@@ -22,9 +22,10 @@ class Config:
     my_puuids: Versions = field(default_factory=dict)
     recent_games: int = 5
     autostart: bool = False
-    # 送頭場門檻：死亡速率（單場死亡數 ÷ 整局分鐘）≥ 此值；舊版的 KDA／KD／死亡次數三個欄位載入時直接捨棄
-    feeding_deaths_per_minute: float = FEEDING_DEATHS_PER_MINUTE
-    poke_kd_at_most: float = POKE_KD_AT_MOST  # 戳場門檻：單場 KD ≤ 此值
+    # 戳場門檻：死亡速率（單場死亡數 ÷ 整局分鐘）≥ poke_deaths_per_minute，且單場 KDA ≤ poke_kda_at_most。
+    # 舊版欄位（送頭場的 feeding_*、戳場的 poke_kd_at_most）載入時搬移或捨棄，見 _migrate_poke
+    poke_deaths_per_minute: float = POKE_DEATHS_PER_MINUTE
+    poke_kda_at_most: float = POKE_KDA_AT_MOST
 
     def my_puuid(self, key: str) -> str:
         """本人在這組 Key 下的 PUUID；還沒查到時是空字串。"""
@@ -40,7 +41,7 @@ class Config:
     @classmethod
     def load(cls) -> "Config":
         try:
-            data = _migrate_feeding(_migrate_puuids(_migrate_keys(
+            data = _migrate_poke(_migrate_puuids(_migrate_keys(
                 json.loads(config_path().read_text(encoding="utf-8")))))
             return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
         except (OSError, ValueError, TypeError, AttributeError):
@@ -64,11 +65,13 @@ def _migrate_keys(data: dict) -> dict:
 OLD_FEEDING_DEFAULT = 0.5  # v1.5.0 以前的送頭場門檻預設值
 
 
-def _migrate_feeding(data: dict) -> dict:
-    """門檻存的是舊預設值 0.5：當成沒改過，換成目前的預設值。
-    分不出是不是使用者刻意設成 0.5 的，接受這個副作用（#18）。"""
-    if data.get("feeding_deaths_per_minute") == OLD_FEEDING_DEFAULT:
-        data["feeding_deaths_per_minute"] = FEEDING_DEATHS_PER_MINUTE
+def _migrate_poke(data: dict) -> dict:
+    """送頭場併入戳場（#21）：舊的送頭場門檻（feeding_deaths_per_minute）沿用為戳場的死亡速率門檻；
+    存的是舊預設值 0.5 時當成沒改過，換成目前的預設值（分不出是不是刻意設成 0.5，接受這個副作用，#18）。
+    舊戳場的 KD 門檻（poke_kd_at_most）不是 Config 的欄位，載入時捨棄，不轉換成 KDA。"""
+    old = data.get("feeding_deaths_per_minute")
+    if "poke_deaths_per_minute" not in data and old is not None:
+        data["poke_deaths_per_minute"] = POKE_DEATHS_PER_MINUTE if old == OLD_FEEDING_DEFAULT else old
     return data
 
 
