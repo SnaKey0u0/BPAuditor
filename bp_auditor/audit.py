@@ -64,6 +64,8 @@ class Audit:
         self.on_mastery = on_mastery
         self._match_pool = ThreadPoolExecutor(max_workers=10)
         self._matches: dict[str, Future] = {}
+        self._ids: dict[str, Future] = {}
+        self._me_future: Future | None = None
         self._lock = threading.Lock()
 
     # ─── 共用：同一場對戰在一次稽查內只查一次 ───
@@ -76,15 +78,44 @@ class Audit:
     def _fetch(self, ids: list[str]) -> list[dict]:
         return [f.result() for f in [self._match(mid) for mid in ids]]
 
+    def _match_ids(self, puuid: str) -> list[str]:
+        """同一個人的對戰 id 在一次稽查內只查一次（本人的卡片與 _resolve_me 共用）。"""
+        with self._lock:
+            f, owner = self._ids.get(puuid), puuid not in self._ids
+            if owner:
+                f = self._ids[puuid] = Future()
+        if owner:
+            try:
+                f.set_result(self.client.match_ids(puuid, self.games))
+            except BaseException as e:
+                f.set_exception(e)
+        return f.result()
+
+    def _puuid(self, rid: RiotId) -> str:
+        """觀戰 API 已給的、或房間裡寫著本人的 Riot ID 時沿用 _resolve_me 查到的，都不必再查帳號。"""
+        if puuid := self.puuids.get(str(rid)):
+            return puuid
+        if self._me_future and self.me.riot_id and rid.same_as(self.me.riot_id):
+            try:
+                me, _ = self._me_future.result()
+            except RiotError:
+                me = None  # 本人查不到：當成一般玩家，用 Riot ID 查
+            if me and me.riot_id and rid.same_as(me.riot_id):  # 本人改名、舊名字被別人拿去時不會認錯
+                return me.puuid
+        return self.client.account_puuid(rid.name, rid.tag)
+
     def _player(self, rid: RiotId) -> tuple[str, list[dict], dict[str, Rank] | None, Mastery | None]:
         """(puuid, 近期戰績, 牌位, 本場英雄熟練度)。"""
-        puuid = self.puuids.get(str(rid)) or self.client.account_puuid(rid.name, rid.tag)
-        futures = [self._match(mid) for mid in self.client.match_ids(puuid, self.games)]
+        puuid = self._puuid(rid)
+        futures = [self._match(mid) for mid in self._match_ids(puuid)]
         rank, mast = self._ranks(puuid), self._mastery(str(rid), puuid)  # 對戰在背景下載時順便查
         return puuid, [f.result() for f in futures], rank, mast
 
     def _resolve_me(self) -> tuple[Me, list[str]]:
-        """查出本人目前的 Riot ID（偵測改名）與近期對戰 id。"""
+        """查出本人目前的 Riot ID（偵測改名）與近期對戰 id。
+        之前已查過本人的近期戰績（prior 有「你」：同一房間多了新人、或進了遊戲）時直接沿用，改名那時已經偵測過。"""
+        if (prior := self.prior.get(ME)) and self.me.riot_id and self.me.puuid and prior[0] == self.me.puuid:
+            return self.me, [m["metadata"]["matchId"] for m in prior[1]]
         me = None
         if self.me.puuid:
             try:
@@ -98,7 +129,7 @@ class Audit:
             me = Me(rid, self.client.account_puuid(rid.name, rid.tag))
         if me.riot_id != self.me.riot_id or me.puuid != self.me.puuid:
             self.on_me(me)
-        return me, self.client.match_ids(me.puuid, self.games)
+        return me, self._match_ids(me.puuid)
 
     def _ranks(self, puuid: str) -> dict[str, Rank] | None:
         try:
@@ -135,7 +166,7 @@ class Audit:
     def _run(self):
         has_me = bool(self.me.puuid or self.me.riot_id)
         with ThreadPoolExecutor(max_workers=6) as pool:
-            me_future = pool.submit(self._resolve_me) if has_me else None
+            me_future = self._me_future = pool.submit(self._resolve_me) if has_me else None
             futures = {pool.submit(self._player, m): m for m in self.query}
             queried = {str(m) for m in self.query}
             extra = [pool.submit(self._prior_mastery, l) for l in self.champions
