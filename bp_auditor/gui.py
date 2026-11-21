@@ -1,6 +1,7 @@
 """PySide6 介面：左側欄（剪貼簿監看 / 手動貼上 / 查對面）+ 右側玩家卡片（房間單欄、遊戲中左右兩隊）或設定頁，
 關閉時縮到系統匣。"""
 import math
+import re
 import sys
 import threading
 import time
@@ -10,9 +11,9 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QGuiApplication, QIcon, QPainter, QPainterPath,
-                           QImage, QPen, QPixmap, QTextDocument)
+                           QCursor, QImage, QPen, QPixmap)
 from PySide6.QtWidgets import (
-    QAbstractButton, QApplication, QBoxLayout, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QAbstractButton, QApplication, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
     QSpacerItem, QStackedWidget, QSystemTrayIcon, QToolTip, QVBoxLayout, QWidget,
 )
@@ -71,10 +72,13 @@ def grey(text: str) -> str:
     return f"<span style='color:{GREY}'>{text}</span>"
 
 
-def natural_width(label: QLabel) -> int:
-    """QLabel 的 rich text 排成一行、不換行時的寬度（px）。"""
-    doc = QTextDocument(); doc.setDocumentMargin(0); doc.setDefaultFont(label.font()); doc.setHtml(label.text())
-    return math.ceil(doc.idealWidth())
+def keep_together(html: str) -> str:
+    """讓這段 rich text 換行時不被拆開：空白換成不換行空白，字與字之間插入 word joiner（U+2060）。
+    QLabel 的行內 white-space:nowrap 沒有作用，中文又可以在任兩字之間換行，所以只能這樣做。"""
+    wj = "<span style='font-size:1px'>⁠</span>"  # 字型沒有這個字元，備用字型的行高較大；縮到 1px 不撐高這一行
+    parts = re.split(r"(<[^>]*>|&\w+;)", html)
+    return "".join(p if p.startswith(("<", "&")) else wj + wj.join(p.replace(" ", " ")) + wj
+                   for p in parts if p)
 
 
 def kda_html(kda: float, kd: float) -> str:
@@ -302,13 +306,13 @@ class PlayerCard(QFrame):
         self.set_stripe(None)
         v = QVBoxLayout(self); v.setContentsMargins(12, 8, 10, 8); v.setSpacing(4)
 
-        self.head = QBoxLayout(QBoxLayout.LeftToRight); self.head.setSpacing(10)  # 方向見 _fit_head
-        self.title = QLabel()
-        self.title.setToolTip("開啟 op.gg")
-        self.title.linkActivated.connect(lambda _: QDesktopServices.openUrl(QUrl(opgg_profile(self.rid))))
-        self.rank = QLabel(); self.rank.setWordWrap(True)  # 再窄也只在牌位自己那一行換行，不撐寬卡片
-        self.head.addWidget(self.title, 0, Qt.AlignTop); self.head.addWidget(self.rank, 1)
-        v.addLayout(self.head)
+        # 標題列是一個可換行的 QLabel：名稱、等級、牌位依序排，放不下就換行；等級與牌位各自不拆開。
+        # 不依寬度切換版面：那樣會讓卡片的尺寸需求跟著變，兩欄畫面在某些寬度會無限重排而閃退（#20）。
+        self.title = QLabel(); self.title.setWordWrap(True)
+        self.title.linkActivated.connect(self._on_title_link)
+        self.title.linkHovered.connect(self._on_title_hover)
+        self.extra, self.rank_html, self.rank_tip = "", "", ""
+        v.addWidget(self.title)
 
         mid = QHBoxLayout(); mid.setSpacing(14)
         self.big = QLabel(); self.kda = QLabel()
@@ -337,23 +341,29 @@ class PlayerCard(QFrame):
         self.set_title("")
         self.set_skeleton()
 
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self._fit_head()
+    def _render_title(self):
+        """名稱（連到 op.gg）＋等級＋牌位。牌位包成 rank 連結只為了滑鼠移上去時顯示勝敗。"""
+        name = (f"<a href='opgg' style='color:#e0e0e0;text-decoration:none'>"
+                f"<b style='font-size:15px'>{self.rid}</b></a>")
+        extra = f" {keep_together(self.extra)}" if self.extra else ""
+        rank = ""
+        if self.rank_html:
+            rank = self.rank_html
+            if self.rank_tip:
+                rank = f"<a href='rank' style='color:#e0e0e0;text-decoration:none'>{rank}</a>"
+            rank = "&nbsp;&nbsp; " + rank
+        self.title.setText(name + extra + rank)
 
-    def _fit_head(self):
-        """名稱和牌位排得下就同一列；排不下時牌位整行移到名稱下方，名稱也可以換行（不截斷）。"""
-        m = self.layout().contentsMargins()
-        room = self.contentsRect().width() - m.left() - m.right()
-        rank = natural_width(self.rank) if not self.rank.isHidden() and self.rank.text() else 0
-        need = natural_width(self.title) + (self.head.spacing() + rank if rank else 0)
-        side = need <= room
-        if (self.head.direction() == QBoxLayout.LeftToRight) == side and self.title.wordWrap() != side:
-            return
-        self.head.setDirection(QBoxLayout.LeftToRight if side else QBoxLayout.TopToBottom)
-        self.head.setSpacing(10 if side else 2)
-        self.head.setStretchFactor(self.rank, 1 if side else 0)
-        self.title.setWordWrap(not side)
+    def _on_title_link(self, href: str):
+        if href == "opgg":
+            QDesktopServices.openUrl(QUrl(opgg_profile(self.rid)))
+
+    def _on_title_hover(self, href: str):
+        tip = {"opgg": "開啟 op.gg", "rank": self.rank_tip}.get(href, "")
+        if tip:
+            QToolTip.showText(QCursor.pos(), tip, self.title)
+        else:
+            QToolTip.hideText()
 
     def set_compact(self, on: bool):
         """對局的兩隊畫面：卡片較窄，改用小方塊；同一列兩張卡片等高，多出的空間放在底部。
@@ -365,17 +375,16 @@ class PlayerCard(QFrame):
     def show_hidden(self, alias: str = ""):
         """Riot 隱藏了此人身分：沒有 Riot ID／PUUID 查不到戰績，只顯示化名或本場英雄。"""
         name = f"{alias} " if alias else ""
-        self.title.setText(f"<b style='font-size:15px'>{name}</b>{grey('身分被隱藏')}"); self.title.setToolTip("")
-        self.clear_skeleton(); self.tiles.hide(); self.rank.hide(); self.kda.hide()
+        self.title.setText(f"<b style='font-size:15px'>{name}</b>{grey('身分被隱藏')}")  # 沒有連結
+        self.clear_skeleton(); self.tiles.hide(); self.kda.hide()
         self.big.setText(grey("Riot 沒有提供這位玩家的身分，無法查詢"))
         self.hidden = True
-        self._fit_head()
         self.show_champion()
 
     def set_title(self, extra: str = ""):
-        self.title.setText(f"<a href='opgg' style='color:#e0e0e0;text-decoration:none'>"
-                           f"<b style='font-size:15px'>{self.rid}</b></a> {extra}")
-        self._fit_head()
+        """extra：接在名稱後面的等級等資訊（不拆開換行）。"""
+        self.extra = extra
+        self._render_title()
 
     def mark_me(self):
         self.is_me = True
@@ -394,7 +403,8 @@ class PlayerCard(QFrame):
         """換 Key 重跑：舊 Key 查到的結果全部清掉，回到查詢中（ADR 0002）。"""
         self.result = None
         self.mastery, self.mastery_loaded = None, False
-        self.big.setText(""); self.big.setToolTip(""); self.kda.setText(""); self.rank.setText("")
+        self.big.setText(""); self.big.setToolTip(""); self.kda.setText("")
+        self.rank_html, self.rank_tip = "", ""
         for w in (self.streak, self.feed_tag, self.poke_tag, self.chip):
             w.hide()
         self.set_title("")
@@ -457,16 +467,17 @@ class PlayerCard(QFrame):
 
     def show_ranks(self, ranks):
         if ranks is None:
-            self.rank.setText(grey("牌位查不到")); self.rank.setToolTip(""); self._fit_head(); return
+            self.rank_html, self.rank_tip = keep_together(grey("牌位查不到")), ""
+            self._render_title(); return
         parts, tips = [], []
         for q in ("單雙", "彈性"):
             r = ranks.get(q)
-            parts.append(f"{grey(q)} {r if r else grey('未定級')}")
+            parts.append(keep_together(f"{grey(q)} {r if r else grey('未定級')}"))  # 一個佇列一段，段間才換行
             if r:
                 games = r.wins + r.losses
                 tips.append(f"{q} {r.wins}勝{r.losses}敗" + (f"（{round(r.wins / games * 100)}%）" if games else ""))
-        self.rank.setText(" · ".join(parts)); self.rank.setToolTip("\n".join(tips))
-        self._fit_head()
+        self.rank_html, self.rank_tip = " · ".join(parts), "\n".join(tips)
+        self._render_title()
 
     def _tile_tip(self, g: GameSummary) -> str:
         """單場提示框：英雄頭像、K/D/A 與勝敗、英雄與模式、裝備列、主符文與召喚師技能列、時長與死亡速率；
