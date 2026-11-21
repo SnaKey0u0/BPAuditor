@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .analysis import FEEDING_DEATHS_PER_MINUTE
 from .keys import KeyPool
-from .puuids import Blacklist, Version, Versions
+from .puuids import Versions
 
 
 def config_path() -> Path:
@@ -24,34 +24,16 @@ class Config:
     autostart: bool = False
     # 送頭場門檻：死亡速率（單場死亡數 ÷ 整局分鐘）≥ 此值；舊版的 KDA／KD／死亡次數三個欄位載入時直接捨棄
     feeding_deaths_per_minute: float = FEEDING_DEATHS_PER_MINUTE
-    # 黑名單以帳號認定（改名後仍認得）：每一筆存各組 Key 的 PUUID 版本
-    blacklist: Blacklist = field(default_factory=Blacklist)
 
     def my_puuid(self, key: str) -> str:
         """本人在這組 Key 下的 PUUID；還沒查到時是空字串。"""
         return self.my_puuids.get(key, "") if key else ""
 
-    def is_blacklisted(self, key: str, puuid: str) -> bool:
-        """puuid 出自 key（這次稽查所用的 Key）。"""
-        return self.blacklist.contains(key, puuid)
-
-    def toggle_blacklist(self, key: str, puuid: str) -> bool:
-        """切換黑名單並立即存檔；回傳切換後是否在黑名單。加入時只先存 key 這一版，其他 Key 的版本用 add_versions 補。"""
-        on = self.blacklist.toggle(key, puuid)
-        self.save()
-        return on
-
-    def add_versions(self, versions: list[Version]):
-        """套用換算結果（新增 Key 或加入黑名單後，背景查回來的其他 Key 版本）並存檔。"""
-        if any([self.blacklist.add_version(v) for v in versions]):
-            self.save()
-
     def remove_key(self, key: str) -> bool:
-        """從 Key 清單刪除，並一併刪掉本人與黑名單中它那個版本。"""
+        """從 Key 清單刪除，並一併刪掉本人在它那個版本的 PUUID。"""
         if not self.api_keys.remove(key):
             return False
         self.my_puuids.pop(key.strip(), None)
-        self.blacklist.drop_key(key.strip())
         return True
 
     @classmethod
@@ -65,7 +47,7 @@ class Config:
     def save(self):
         p = config_path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        data = {**asdict(self), "api_keys": self.api_keys.to_json(), "blacklist": self.blacklist.snapshot()}
+        data = {**asdict(self), "api_keys": self.api_keys.to_json()}
         p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -78,12 +60,12 @@ def _migrate_keys(data: dict) -> dict:
 
 
 def _migrate_puuids(data: dict) -> dict:
-    """舊設定檔的本人與黑名單 PUUID 只出自一組 Key（my_puuid、一串 PUUID）：都歸到清單的 #1。
-    清單沒有 Key 時無從歸屬，捨棄（PUUID 不知道是哪組 Key 加密的，比對不到任何人）。"""
+    """舊設定檔的本人 PUUID 只出自一組 Key（my_puuid）：歸到清單的 #1。
+    清單沒有 Key 時無從歸屬，捨棄（PUUID 不知道是哪組 Key 加密的，比對不到任何人）。
+    黑名單已移除（#12）：舊設定檔的 blacklist 欄位不是 Config 的欄位，載入時捨棄，下次存檔就消失。"""
     first = next((k.key for k in data["api_keys"]), "")
     if "my_puuids" not in data:
         old = str(data.get("my_puuid") or "")
         data["my_puuids"] = {first: old} if old and first else {}
     data["my_puuids"] = {str(k): str(v) for k, v in dict(data["my_puuids"]).items() if k and v}
-    data["blacklist"] = Blacklist.from_json(data.get("blacklist"), legacy_key=first)
     return data

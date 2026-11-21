@@ -14,30 +14,15 @@ def temp_appdata(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_黑名單_切換一次加入_切換兩次回到原狀():
-    cfg = Config()
-    assert not cfg.is_blacklisted(K, "puuid-A")
-
-    cfg.toggle_blacklist(K, "puuid-A")
-    assert cfg.is_blacklisted(K, "puuid-A")
-
-    cfg.toggle_blacklist(K, "puuid-A")
-    assert not cfg.is_blacklisted(K, "puuid-A")
-
-
-def test_黑名單_切換後立即存檔_重新載入仍在():
-    Config().toggle_blacklist(K, "puuid-A")
-
-    assert Config.load().is_blacklisted(K, "puuid-A")
-
-
-def test_舊設定檔沒有黑名單欄位_載入為空名單():
+def test_舊設定檔有黑名單_其他設定照常載入_存檔後黑名單消失():
+    """黑名單已移除（#12）。"""
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"api_key": "k", "recent_games": 7}), encoding="utf-8")
+    path.write_text(json.dumps({"api_keys": [{"key": K}], "recent_games": 7, "my_puuids": {K: "me-1"},
+                                "blacklist": [{K: "bad-1"}, "bad-2"]}), encoding="utf-8")
 
     cfg = Config.load()
+    cfg.save()
 
-    assert cfg.recent_games == 7
-    assert len(cfg.blacklist) == 0
-    assert not cfg.is_blacklisted(K, "puuid-A")
+    assert cfg.recent_games == 7 and cfg.my_puuid(K) == "me-1"
+    assert "blacklist" not in json.loads(path.read_text(encoding="utf-8"))

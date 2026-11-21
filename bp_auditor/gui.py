@@ -121,7 +121,6 @@ class Bridge(QObject):
     champions = Signal(object)
     key_checked = Signal(str, str, str)  # (key, 錯誤種類, 錯誤訊息)；種類為空字串代表有效
     me_lookup = Signal(str, object, str)  # (Riot ID, {Key: puuid}, 錯誤訊息)；某組查不到時其他組照樣存
-    versions = Signal(object)  # list[Version]：黑名單其他 Key 的版本，背景換算回來
     icon_ready = Signal()
     game = Signal(object, str, bool, str)  # (進行中對局或 None, 錯誤訊息, 是否手動, 查詢所用的 Key)
     mastery = Signal(str, object)  # (標籤, Mastery 或 None)
@@ -151,31 +150,6 @@ class Switch(QAbstractButton):
         if self.text():
             p.setPen(QColor("#e0e0e0" if enabled else "#757575"))
             p.drawText(QRectF(46, 0, self.width() - 46, self.height()), Qt.AlignVCenter, self.text())
-
-
-class FlagButton(QAbstractButton):
-    """「!」黑名單切換鈕。圓圈與驚嘆號都自己畫，不靠字型，驚嘆號才會在圓圈正中心。"""
-
-    def __init__(self):
-        super().__init__()
-        self.setCheckable(True); self.setFixedSize(24, 24); self.setCursor(Qt.PointingHandCursor)
-        self.setAttribute(Qt.WA_Hover)
-
-    def paintEvent(self, e):
-        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
-        if not self.isEnabled():
-            ring = QColor("#30343d"); mark = QColor("#4a5060"); fill = Qt.NoBrush
-        elif self.isChecked():
-            ring = QColor(RED); fill = QColor(RED); mark = QColor("#1b1e24")
-        elif self.underMouse():
-            ring = mark = QColor(RED); fill = Qt.NoBrush
-        else:
-            ring = QColor("#4a5060"); mark = QColor(GREY); fill = Qt.NoBrush
-        p.setPen(QPen(ring, 1)); p.setBrush(fill); p.drawEllipse(QRectF(0.5, 0.5, 23, 23))
-        # 驚嘆號：一條直槓加一個點，整體高 12、以 (12, 12) 為中心
-        p.setPen(Qt.NoPen); p.setBrush(mark)
-        p.drawRoundedRect(QRectF(11, 6, 2, 7.5), 1, 1)
-        p.drawEllipse(QRectF(10.75, 15.5, 2.5, 2.5))
 
 
 class ChampionTiles(QWidget):
@@ -311,7 +285,7 @@ class ChampionTiles(QWidget):
 
 class PlayerCard(QFrame):
     """一位玩家的卡片，分三段：
-    - 標題列：名稱、等級、牌位；右上角的 header_right 放「!」黑名單按鈕。
+    - 標題列：名稱、等級、牌位。
     - 中段：勝率、英雄頭像方塊、KDA／KD；對局中再加一行本場英雄的熟練度。
     - 標籤列 tags：相遇等小標籤，靠左排。
     """
@@ -325,9 +299,6 @@ class PlayerCard(QFrame):
         self.champion_key: int | None = None  # 本場英雄；只在遊戲中有
         self.mastery: Mastery | None = None
         self.mastery_loaded = False
-        self.puuid = ""  # 稽查結果回來才有；黑名單以此判定
-        self.puuid_key = ""  # self.puuid 是用哪一組 Key 查到的（PUUID 依 Key 加密，黑名單要比對同一組的版本）
-        self.blacklisted = False
         self.set_stripe(None)
         v = QVBoxLayout(self); v.setContentsMargins(12, 8, 10, 8); v.setSpacing(4)
 
@@ -337,12 +308,6 @@ class PlayerCard(QFrame):
         self.title.linkActivated.connect(lambda _: QDesktopServices.openUrl(QUrl(opgg_profile(self.rid))))
         self.rank = QLabel(); self.rank.setWordWrap(True)  # 窄卡片時牌位換行，不撐寬卡片
         head.addWidget(self.title, 0, Qt.AlignTop); head.addWidget(self.rank, 1)
-        self.header_right = QHBoxLayout(); self.header_right.setSpacing(4)
-        head.addLayout(self.header_right)
-        # 「!」黑名單切換鈕：取得 PUUID 後才可按；本人與身分被隱藏的玩家不顯示
-        self.flag = FlagButton(); self.flag.setEnabled(False)
-        self.flag.clicked.connect(self.toggle_blacklist)
-        self.header_right.addWidget(self.flag, 0, Qt.AlignTop)
         v.addLayout(head)
 
         mid = QHBoxLayout(); mid.setSpacing(14)
@@ -356,15 +321,13 @@ class PlayerCard(QFrame):
         v.addWidget(self.champ)
 
         self.tags = QHBoxLayout(); self.tags.setSpacing(6)
-        self.black_tag = QLabel("! 黑名單"); self.black_tag.hide()
-        self.black_tag.setStyleSheet(f"background:{RED};color:#1b1e24;font-weight:bold;border-radius:10px;padding:2px 9px;")
         self.streak = QLabel(); self.streak.hide()  # 連勝／連敗
         self.chip = QLabel(); self.chip.hide()
         self.feed_tag = QLabel("送頭"); self.feed_tag.hide()  # 近期戰績有任一場送頭場；排在相遇之前
         self.feed_tag.setStyleSheet(f"background:#12303a;color:{NEON};border:1px solid {NEON};"
                                     "border-radius:10px;padding:2px 9px;")
         self.feed_tag.setToolTip("有青色霓虹框的那幾場；滑鼠移到方塊上看細節")
-        self.tags.addWidget(self.black_tag); self.tags.addWidget(self.streak); self.tags.addWidget(self.feed_tag)
+        self.tags.addWidget(self.streak); self.tags.addWidget(self.feed_tag)
         self.tags.addWidget(self.chip); self.tags.addStretch()
         v.addLayout(self.tags)
         self.bottom = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Minimum)
@@ -386,7 +349,6 @@ class PlayerCard(QFrame):
         self.clear_skeleton(); self.tiles.hide(); self.rank.hide(); self.kda.hide()
         self.big.setText(grey("Riot 沒有提供這位玩家的身分，無法查詢"))
         self.hidden = True
-        self.flag.hide()
         self.show_champion()
 
     def set_title(self, extra: str = ""):
@@ -395,35 +357,10 @@ class PlayerCard(QFrame):
 
     def mark_me(self):
         self.is_me = True
-        self.flag.hide()
-        self.show_blacklist()
 
     def set_stripe(self, color):
-        """可能多排的左側色條；與黑名單的紅框暗紅底一起組成卡片樣式。"""
-        self.stripe = color
-        self._restyle()
-
-    def _restyle(self):
-        if self.blacklisted:  # 黑名單：紅框＋暗紅底，可能多排的色條照樣蓋在左邊
-            self.setStyleSheet(f"#card{{background:#3a2226;border:1px solid {RED};"
-                               f"border-left:6px solid {self.stripe or RED};}}")
-        else:
-            self.setStyleSheet(f"#card{{border-left:6px solid {self.stripe or '#262a33'};}}")
-
-    def toggle_blacklist(self):
-        if self.puuid and not self.is_me:
-            self.win.toggle_blacklist(self.puuid_key, self.puuid)
-        self.show_blacklist()
-
-    def show_blacklist(self):
-        """依設定檔的黑名單更新「!」按鈕、標籤與卡片顏色；沒有 PUUID（查詢中／失敗）時按鈕不可用。"""
-        usable = bool(self.puuid) and not self.is_me and not self.hidden
-        self.blacklisted = usable and self.win.cfg.is_blacklisted(self.puuid_key, self.puuid)
-        self.flag.setEnabled(usable)
-        self.flag.setChecked(self.blacklisted)
-        self.flag.setToolTip("已在黑名單（再點一次移除）" if self.blacklisted else "加入黑名單")
-        self.black_tag.setVisible(self.blacklisted)
-        self._restyle()
+        """可能多排的左側色條。"""
+        self.setStyleSheet(f"#card{{border-left:6px solid {color or '#262a33'};}}")
 
     def set_skeleton(self):
         """查詢中：灰色佔位方塊。"""
@@ -433,7 +370,7 @@ class PlayerCard(QFrame):
 
     def reset(self):
         """換 Key 重跑：舊 Key 查到的結果全部清掉，回到查詢中（ADR 0002）。"""
-        self.result, self.puuid, self.puuid_key = None, "", ""
+        self.result = None
         self.mastery, self.mastery_loaded = None, False
         self.big.setText(""); self.big.setToolTip(""); self.kda.setText(""); self.rank.setText("")
         for w in (self.streak, self.feed_tag, self.chip):
@@ -441,7 +378,6 @@ class PlayerCard(QFrame):
         self.set_title("")
         self.set_skeleton()
         self.show_champion()
-        self.show_blacklist()
 
     def clear_skeleton(self):
         for w in (self.big, self.kda):
@@ -456,8 +392,6 @@ class PlayerCard(QFrame):
         self.streak.hide()
         self.feed_tag.hide()
         self.show_champion()
-        self.puuid = "" if r.error else (r.puuid or "")
-        self.show_blacklist()
         if r.error:
             if r.error.kind == "key":
                 self.big.setText(grey("—")); self.big.setToolTip("")
@@ -745,7 +679,6 @@ class MainWindow(QMainWindow):
         b.player.connect(self.on_player); b.outcome.connect(self.on_outcome); b.me.connect(self.on_me)
         b.done.connect(self.on_done); b.champions.connect(self.on_champions)
         b.key_checked.connect(self.on_key_checked); b.me_lookup.connect(self.on_me_lookup)
-        b.versions.connect(self.cfg.add_versions)
         b.icon_ready.connect(self.refresh_cards)
         b.game.connect(self.on_game); b.mastery.connect(self.on_mastery)
         b.restart.connect(self.on_restart); b.key_failed.connect(self.on_key_failed)
@@ -880,7 +813,7 @@ class MainWindow(QMainWindow):
         return self.rotation.current()
 
     def client_for(self, key: str) -> RiotClient:
-        """指定 Key 的客戶端（遵守它自己的限速，冷卻就等）：補查本人、換算黑名單等只能用這組 Key 的請求。"""
+        """指定 Key 的客戶端（遵守它自己的限速，冷卻就等）：補查本人等只能用這組 Key 的請求。"""
         return self.rotation.client(key)
 
     def tick_keys(self):
@@ -909,7 +842,7 @@ class MainWindow(QMainWindow):
             self.show_key_banner("所有 API Key 都失效了，請重新產生", "取得新 Key")
 
     def on_keys_changed(self):
-        """清單或狀態變了：存檔、重畫。本人與黑名單每組 Key 各有一份 PUUID，換使用中的 Key 不必重查。"""
+        """清單或狀態變了：存檔、重畫。本人每組 Key 各有一份 PUUID，換使用中的 Key 不必重查。"""
         self.cfg.save()
         self.update_key_status()
 
@@ -930,7 +863,7 @@ class MainWindow(QMainWindow):
         return True
 
     def remove_key(self, key: str):
-        if self.cfg.remove_key(key):  # 本人與黑名單中它那個版本一併刪掉
+        if self.cfg.remove_key(key):  # 本人在它那個版本的 PUUID 一併刪掉
             self.key_banner.hide()
             self.on_keys_changed()
 
@@ -976,15 +909,10 @@ class MainWindow(QMainWindow):
         QApplication.alert(self)
 
     def backfill_key(self, key: str):
-        """Key 可用之後：本人用 Riot ID 查一次這組 Key 的 PUUID；黑名單每筆用既有的可用 Key 換算出這組的版本。
-        只補還沒有這組版本的，重複呼叫不會多查。"""
+        """Key 可用之後：本人用 Riot ID 查一次這組 Key 的 PUUID；已經有這組的版本就不查。"""
         rid = RiotId.parse(self.cfg.my_riot_id) if self.cfg.my_riot_id else None
         if rid and not self.cfg.my_puuid(key):
             self.lookup_me(rid, [key])
-        entries, sources = self.cfg.blacklist.snapshot(), self.usable_keys(but=key)
-        if entries and sources:
-            threading.Thread(target=lambda: self.bridge.versions.emit(puuids.backfill(entries, key, sources, self.client_for)),
-                             daemon=True).start()
 
     def show_key_banner(self, text: str, button: str):
         self.key_banner_text.setText(text); self.key_banner_btn.setText(button)
@@ -1037,12 +965,6 @@ class MainWindow(QMainWindow):
             self.me_note = f"你的 Riot ID 已更新為 {me.riot_id}"
         if missing := [k for k in self.usable_keys() if not self.cfg.my_puuid(k)]:
             self.lookup_me(me.riot_id, missing)
-
-    def toggle_blacklist(self, key: str, puuid: str):
-        """切換黑名單（puuid 出自 key）；加入時用其他可用的 Key 各換算一份，換 Key 稽查也認得。"""
-        if self.cfg.toggle_blacklist(key, puuid) and (targets := self.usable_keys(but=key)):
-            threading.Thread(target=lambda: self.bridge.versions.emit(puuids.spread(key, puuid, targets, self.client_for)),
-                             daemon=True).start()
 
     # ─── 雜項 ───
     def _load_champions(self):
@@ -1324,7 +1246,6 @@ class MainWindow(QMainWindow):
     def on_player(self, r: PlayerResult, key: str):
         k = key_of(r.riot_id)
         if card := self.cards.get(k):
-            card.puuid_key = key
             card.show_result(r)
             if r.is_me:
                 self._mark_me(card, k)
