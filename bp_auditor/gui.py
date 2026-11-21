@@ -1223,15 +1223,18 @@ class MainWindow(QMainWindow):
         req = self.session.request(query, self.key_manager.use(key), games=self.cfg.recent_games,
                                    me_riot_id=self.my_riot_id(), my_puuids=self.cfg.my_puuids, **game)
         job = req.job(Listener(b.player.emit, b.me.emit, b.outcome.emit, b.mastery.emit, b.restart.emit))
-        self._run_with_key(job, lambda _: None, lambda e: b.audit_error.emit(str(e)), b.done.emit)
+        self._run_with_key(job, lambda _: None, lambda e: b.audit_error.emit(str(e)), b.done.emit,
+                           cost=req.rerun_cost)
 
     def _run_with_key(self, job: Callable[[str, RiotClient], object], on_result: Callable[[object], None],
-                      on_error: Callable[[RiotError], None], on_exit: Callable[[], None] = lambda: None):
+                      on_error: Callable[[RiotError], None], on_exit: Callable[[], None] = lambda: None,
+                      cost: int = 0):
         """在背景用使用中的 Key 跑 job（稽查與查對面共用）：冷卻或失效時輪替，整個 job 用新 Key 重跑。
-        回 401/403 的 Key 經 key_failed 訊號交回介面執行緒更新清單狀態，背景執行緒不改設定。"""
+        回 401/403 的 Key 經 key_failed 訊號交回介面執行緒更新清單狀態，背景執行緒不改設定。
+        cost：整次重跑要幾次請求；目標 Key 的額度不夠就不因冷卻換過去（KeyManager.run）。"""
         def run():
             try:
-                on_result(self.key_manager.run(job, self.bridge.key_failed.emit))
+                on_result(self.key_manager.run(job, self.bridge.key_failed.emit, cost))
             except RiotError as e:
                 on_error(e)
             finally:
@@ -1354,7 +1357,7 @@ class MainWindow(QMainWindow):
             return client.active_game(me), k
 
         self._run_with_key(job, lambda r: self.bridge.game.emit(r[0], "", manual, r[1]),
-                           lambda e: self.bridge.game.emit(None, str(e), manual, key))
+                           lambda e: self.bridge.game.emit(None, str(e), manual, key), cost=1)  # 只查一次觀戰
 
     def on_game(self, game: dict | None, error: str, manual: bool, key: str):
         self.apply(self.scheduler.spectated(game, error, key, manual=manual, current_game_id=self.session.game_id))

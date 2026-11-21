@@ -77,6 +77,13 @@ class AuditRequest:
     first_key: str
     game: dict = field(default_factory=dict)  # 查對面時：puuids、champions、sides
 
+    @property
+    def rerun_cost(self) -> int:
+        """換 Key 從頭重跑這次稽查最多要幾次請求：每人（帳號、近期戰績清單、熟練度等約 3 次）＋近期場數，
+        查對面再加 1 次重查觀戰（#33）。上限估法，實際通常比較少。"""
+        players = sum(1 for m in self.room if not m.hidden)
+        return players * (self.games + 3) + (1 if "puuids" in self.game else 0)
+
     def job(self, listener: Listener) -> Callable[[str, RiotClient], None]:
         """給 rotation.run_rotating 的 job(key, client)。第一次照請求查；換了 Key（或一開始就不是 first_key）時
         舊 Key 查到的都不要，房間（或對局）裡每個人都用新 Key 重查（ADR 0002）。"""
