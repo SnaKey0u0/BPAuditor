@@ -624,16 +624,17 @@ class SettingsPage(QWidget):
         # 戳場判定：死亡速率 ≥ 門檻且單場 KDA ≤ 門檻（0 死不算）；改了立即存檔並重畫卡片，不重新稽查
         head = QLabel("<b>戳場</b>"); head.setStyleSheet("padding-top:10px;"); f.addRow(head)
         self.poke_rate = QDoubleSpinBox(); self.poke_rate.setRange(0.05, 5); self.poke_rate.setDecimals(2)
-        self.poke_rate.setSingleStep(0.05); self.poke_rate.setSuffix(" 次以上")
+        self.poke_rate.setSingleStep(0.05); self.poke_rate.setPrefix("≥ ")
         self.poke_rate.setValue(cfg.poke_deaths_per_minute)
         self.poke_rate.setKeyboardTracking(False); self.poke_rate.valueChanged.connect(self.save_poke)
-        f.addRow("每分鐘死亡", self.poke_rate)
+        f.addRow("死亡速率", self.poke_rate)
+        f.addRow("", QLabel(grey("死亡 ÷ 整局分鐘")))
         self.poke_kda = QDoubleSpinBox(); self.poke_kda.setRange(0.1, 10); self.poke_kda.setDecimals(2)
-        self.poke_kda.setSingleStep(0.1); self.poke_kda.setSuffix(" 以下")
+        self.poke_kda.setSingleStep(0.1); self.poke_kda.setPrefix("≤ ")
         self.poke_kda.setValue(cfg.poke_kda_at_most)
         self.poke_kda.setKeyboardTracking(False); self.poke_kda.valueChanged.connect(self.save_poke)
         f.addRow("KDA", self.poke_kda)
-        f.addRow("", QLabel(grey("兩者都符合才算；KDA =（擊殺＋助攻）÷ 死亡")))
+        f.addRow("", QLabel(grey("（擊殺 + 助攻）÷ 死亡")))
 
     def save_me(self):
         text = self.me.text().strip()
