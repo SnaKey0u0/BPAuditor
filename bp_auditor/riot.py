@@ -1,4 +1,6 @@
 """Riot 官方 API 的最小客戶端（台服 tw2 / match 走 sea），內建 Key 的限速；冷卻或失效時可交給輪替換 Key（rotation）。"""
+import gzip
+import http.client
 import json
 import math
 import re
@@ -7,6 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from collections import deque
 from typing import Callable
 
@@ -44,12 +47,88 @@ Fetch = Callable[[str, str, float], tuple[int, dict, bytes]]  # (url, key, timeo
 
 
 def urllib_fetch(url: str, key: str, timeout: float) -> tuple[int, dict, bytes]:
+    """每個請求一條新連線（urllib 一律送 Connection: close）。只在系統設了 HTTPS 代理時使用，見 default_fetch。"""
     req = urllib.request.Request(url, headers={"X-Riot-Token": key, "User-Agent": "bp-auditor"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, dict(resp.headers), resp.read()
     except urllib.error.HTTPError as e:
         return e.code, dict(e.headers or {}), e.read()
+
+
+class ConnectionPool:
+    """重用 HTTPS 連線的傳輸層（keep-alive）：每個 host 留著用完的連線，下一個請求（任何執行緒）接著用，
+    一次稽查約 40 次請求不必每次都重做 TCP＋TLS 握手。回應要求 gzip，對戰詳情小很多。
+
+    閒置太久被伺服器關掉的連線，換一條重送，使用者看不到錯誤；新連線就失敗時照樣拋出（OSError），
+    由 RiotClient 當成連線失敗重試。執行緒安全。connect 可換成假的連線，測試不必連網。"""
+
+    def __init__(self, connect: Callable[[str, float], http.client.HTTPConnection] | None = None, max_idle: int = 10):
+        self._connect = connect or (lambda host, timeout: http.client.HTTPSConnection(host, timeout=timeout))
+        self._idle: dict[str, list] = {}
+        self._max_idle = max_idle
+        self._lock = threading.Lock()
+
+    def _take(self, host: str):
+        with self._lock:
+            idle = self._idle.get(host)
+            return idle.pop() if idle else None
+
+    def _give(self, host: str, conn):
+        with self._lock:
+            idle = self._idle.setdefault(host, [])
+            if len(idle) < self._max_idle:
+                idle.append(conn); return
+        conn.close()
+
+    def __call__(self, url: str, key: str, timeout: float) -> tuple[int, dict, bytes]:
+        u = urllib.parse.urlsplit(url)
+        path = u.path + (f"?{u.query}" if u.query else "")
+        headers = {"X-Riot-Token": key, "User-Agent": "bp-auditor", "Accept-Encoding": "gzip"}
+        while True:
+            conn = self._take(u.netloc)
+            reused = conn is not None
+            if not reused:
+                conn = self._connect(u.netloc, timeout)
+            elif getattr(conn, "sock", None):
+                conn.sock.settimeout(timeout)
+            try:
+                conn.request("GET", path, headers=headers)
+                resp = conn.getresponse()
+                body = resp.read()
+                hdrs = dict(resp.getheaders())
+                if next((v for k, v in hdrs.items() if k.lower() == "content-encoding"), "").lower() == "gzip":
+                    body = gzip.decompress(body)
+            except (http.client.HTTPException, OSError, EOFError, zlib.error) as e:
+                conn.close()
+                if reused and not isinstance(e, TimeoutError):
+                    continue  # 閒置連線已被伺服器關掉：換一條（或新開一條）重送
+                if isinstance(e, OSError):
+                    raise
+                raise ConnectionError(f"{type(e).__name__}: {e}") from e
+            if resp.will_close:
+                conn.close()
+            else:
+                self._give(u.netloc, conn)
+            return resp.status, hdrs, body
+
+
+def default_fetch() -> Fetch:
+    """預設的傳輸層：重用連線；系統設了 HTTPS 代理時改用 urllib（http.client 不會自己走代理）。"""
+    return urllib_fetch if urllib.request.getproxies().get("https") else ConnectionPool()
+
+
+_shared_fetch: Fetch | None = None
+_shared_lock = threading.Lock()
+
+
+def shared_fetch() -> Fetch:
+    """整個程式共用一個傳輸層，連線跨稽查、跨 Key 重用（Key 在每個請求的標頭裡，與連線無關）。"""
+    global _shared_fetch
+    with _shared_lock:
+        if _shared_fetch is None:
+            _shared_fetch = default_fetch()
+        return _shared_fetch
 
 
 DEFAULT_RETRY_AFTER = 2.0  # 429 沒給 Retry-After，或給的不是秒數（例如 HTTP 日期）時先等這麼久
@@ -119,14 +198,14 @@ class RateLimiter:
 
 class RiotClient:
     """switch：冷卻（要等 wait 秒）或失效（wait 為無限大）時問要不要換 Key，回要換成哪一組或 None（留下來等）。
-    沒給 switch 時冷卻就等，與只有一組 Key 時相同。fetch 可換成假的傳輸層。"""
+    沒給 switch 時冷卻就等，與只有一組 Key 時相同。fetch 可換成假的傳輸層；預設是整個程式共用、重用連線的那一個。"""
 
     def __init__(self, api_key: str, limiter: RateLimiter | None = None, timeout: float = 10.0, *,
                  switch: Callable[[str, float], str | None] | None = None, fetch: Fetch | None = None):
         self._key = api_key.strip()
         self._limiter = limiter or RateLimiter()
         self._timeout = timeout
-        self._switch, self._fetch = switch, fetch or urllib_fetch
+        self._switch, self._fetch = switch, fetch or shared_fetch()
         self._abandoned: KeySwitch | None = None  # 換過 Key 之後，這個客戶端的其他請求（其他執行緒）也立刻放棄
 
     def _give_up(self, reason: str, wait: float) -> None:
