@@ -12,6 +12,7 @@ OK = "ok"
 UNVERIFIED = "unverified"  # 驗證時連線／伺服器出錯，分不出 Key 好壞：先當作可用，但畫面上與驗證過的分開標示
 BAD = "bad"  # 回 401/403 且不是剛產生的：失效，請使用者重新產生；不自動刪除
 _USABLE = (CHECKING, OK, UNVERIFIED)
+WARMUP = 180  # 新 Key 加入後這麼多秒內回 401/403，當作 Riot 還沒啟用（生效中），不是失效
 
 
 @dataclass
@@ -23,6 +24,10 @@ class ApiKey:
     @property
     def usable(self) -> bool:
         return self.status in _USABLE
+
+    def fresh(self, now: float) -> bool:
+        """剛加入、Riot 可能還沒啟用。"""
+        return now - self.added_at < WARMUP
 
 
 @dataclass
@@ -69,6 +74,13 @@ class KeyPool:
     def set_status(self, key: str, status: str):
         if entry := self.get(key):
             entry.status = status
+
+    def auth_failed(self, key: str, now: float) -> str | None:
+        """這組 Key 回 401/403（驗證時或稽查中）：剛加入的當作生效中，否則失效。回傳新的狀態；不在清單裡回 None。"""
+        if entry := self.get(key):
+            entry.status = WARMING if entry.fresh(now) else BAD
+            return entry.status
+        return None
 
     def first_usable(self) -> ApiKey | None:
         """清單中第一組可用的 Key；都不能用時回 None（使用中的 Key 由 rotation.KeyRotation 決定）。"""

@@ -91,58 +91,66 @@ def test_game_summaries_flag_remake_but_not_normal_surrender():
     assert [g.remake for g in game_summaries("a", ms)] == [True, False, False]
 
 
-def _feeding(deaths, minutes, *, kills=0, assists=0, remake=False, threshold=None):
-    """單場死亡數與整局時長（分鐘）→ 該場是否為送頭場（門檻未給就用預設每分鐘 0.5）。"""
+def _poke(kills, deaths, assists, minutes=20, *, remake=False, **thresholds):
+    """單場 K/D/A 與整局時長（分鐘）→ 該場是否為戳場（門檻未給就用預設：每分鐘死亡 ≥ 0.6、KDA ≤ 2.0）。"""
     ms = [match("1", ["a"], ["x"], kda=(kills, deaths, assists), remake=remake, minutes=minutes)]
-    args = () if threshold is None else (threshold,)
-    return game_summaries("a", ms, *args).pop().feeding
+    return game_summaries("a", ms, **thresholds).pop().poke
 
 
-def test_feeding_game_when_death_rate_equals_threshold():
-    assert _feeding(10, 20) is True  # 每分鐘 0.5，剛好等於預設門檻
+def test_poke_game_when_both_equal_thresholds():
+    assert _poke(12, 12, 12) is True  # 每分鐘 0.6、KDA 2.0，兩個都剛好等於預設門檻
 
 
-def test_not_feeding_game_when_death_rate_below_threshold():
-    assert _feeding(9, 20) is False  # 每分鐘 0.45
+def test_not_poke_when_death_rate_below_threshold():
+    assert _poke(0, 11, 0) is False  # KDA 0，但每分鐘只死 0.55 次
 
 
-def test_same_deaths_only_shorter_game_reaches_threshold():
-    assert _feeding(10, 15) is True   # 每分鐘 0.67
-    assert _feeding(10, 25) is False  # 每分鐘 0.4
+def test_not_poke_when_kda_above_threshold():
+    assert _poke(12, 12, 13) is False  # 每分鐘 0.6，但 KDA 2.08
 
 
-def test_high_kda_still_feeding_when_death_rate_reaches_threshold():
-    assert _feeding(10, 20, kills=30, assists=40) is True  # KDA 7、KD 3，KDA／KD 不再影響判定
+def test_same_deaths_only_shorter_game_reaches_death_rate():
+    assert _poke(0, 10, 0, 15) is True   # 每分鐘 0.67
+    assert _poke(0, 10, 0, 25) is False  # 每分鐘 0.4
 
 
-def test_remake_never_a_feeding_game():
-    assert _feeding(3, 3, remake=True) is False  # 每分鐘 1 次，但是重開局
+def test_support_with_many_assists_not_poke():
+    assert _poke(1, 13, 40) is False  # 每分鐘 0.65，但助攻多，KDA 3.15
 
 
-def test_custom_threshold_changes_the_judgement():
-    assert _feeding(10, 20, threshold=0.6) is False
-    assert _feeding(6, 20, threshold=0.3) is True
+def test_no_death_never_a_poke_game():
+    assert _poke(0, 0, 0, poke_rate=0) is False  # 死亡速率門檻設成 0 也一樣：沒死過就不算
+
+
+def test_remake_never_a_poke_game():
+    assert _poke(0, 3, 0, 3, remake=True) is False  # 每分鐘 1 次、KDA 0，但是重開局
+
+
+def test_custom_poke_thresholds():
+    assert _poke(2, 10, 5) is False                            # 每分鐘 0.5、KDA 0.7：死亡速率未達預設
+    assert _poke(2, 10, 5, poke_rate=0.5) is True
+    assert _poke(2, 10, 5, poke_rate=0.5, poke_kda=0.6) is False
 
 
 def test_game_summary_minutes_and_death_rate_from_whole_game_duration():
-    m = match("1", ["a"], ["x"], kda=(2, 9, 4), minutes=18)
+    m = match("1", ["a"], ["x"], kda=(2, 12, 4), minutes=20)
     m["info"]["participants"][0]["timePlayed"] = 300  # 該玩家自己的在線時間不採用
     g = game_summaries("a", [m])[0]
-    assert (g.minutes, g.death_rate, g.feeding) == (18, 0.5, True)
+    assert (g.minutes, g.death_rate, g.poke) == (20, 0.6, True)
 
 
 def test_pre_11_20_game_duration_in_milliseconds():
-    m = match("1", ["a"], ["x"], kda=(0, 10, 0))
+    m = match("1", ["a"], ["x"], kda=(0, 12, 0))
     m["info"]["gameDuration"] = 20 * 60_000
     del m["info"]["gameEndTimestamp"]
     g = game_summaries("a", [m])[0]
-    assert (g.minutes, g.feeding) == (20, True)
+    assert (g.minutes, g.poke) == (20, True)
 
 
-def test_missing_game_duration_never_feeding():
+def test_missing_game_duration_never_poke():
     m = match("1", ["a"], ["x"], kda=(0, 10, 0))
     del m["info"]["gameDuration"]
-    assert game_summaries("a", [m])[0].feeding is False
+    assert game_summaries("a", [m])[0].poke is False
 
 
 def _games(*results):
