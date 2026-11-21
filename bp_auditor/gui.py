@@ -51,7 +51,7 @@ QPushButton#secondary:hover,QPushButton#icon:hover{background:#3a3f4b;}
 QPushButton#icon{padding:4px 8px;font-size:15px;} QPushButton#icon:checked{background:#3949ab;}
 QScrollArea{border:none;}
 #card,#panel{background:#262a33;border-radius:8px;}
-#card QLabel,#panel QLabel{background:transparent;}
+#card QLabel,#panel QLabel,#section{background:transparent;}
 #keybanner{background:#4a2e2e;border-radius:6px;} #keybanner QLabel{background:transparent;}
 QToolTip{background:#262a33;color:#e0e0e0;border:1px solid #3a3f4b;padding:4px;}
 QProgressBar{background:#262a33;border:none;border-radius:2px;}
@@ -621,23 +621,29 @@ class SettingsPage(QWidget):
             self.boot.setEnabled(False); self.boot.setToolTip("只有打包後的 exe 能用")
         f.addRow("開機時啟動", self.boot)
 
-        # 戳場判定：死亡速率 ≥ 門檻且單場 KDA ≤ 門檻（0 死不算）；改了立即存檔並重畫卡片，不重新稽查
-        head = QLabel(f"<b style='font-size:15px;color:{NEON}'>戳場</b>&nbsp;&nbsp;"
-                      f"{grey('死亡速率 ≥ 門檻　且　KDA ≤ 門檻')}")
-        head.setStyleSheet("border-top:1px solid #3a3f4b;margin-top:10px;padding-top:10px;")
-        f.addRow(head)
+        # 戳場判定：死亡速率 ≥ 門檻且單場 KDA ≤ 門檻（0 死不算）；改了立即存檔並重畫卡片，不重新稽查。
+        # 版型 A（prototype/poke-settings-section）：分隔線、靠左的區段標題，兩個門檻整組往右縮
+        section = QWidget(); section.setObjectName("section")
+        sv = QVBoxLayout(section); sv.setContentsMargins(0, 6, 0, 0); sv.setSpacing(6)
+        line = QFrame(); line.setFixedHeight(1); line.setStyleSheet("background:#3a3f4b;")
+        sv.addWidget(line)
+        sv.addWidget(QLabel(f"<b style='font-size:15px;color:{NEON}'>戳場</b>&nbsp;&nbsp;"
+                            f"{grey('死亡速率 ≥ 門檻　且　KDA ≤ 門檻')}"))
+        sub = QFormLayout(); sub.setContentsMargins(16, 0, 0, 0)
+        sv.addLayout(sub)
+        f.addRow(section)
         self.poke_rate = QDoubleSpinBox(); self.poke_rate.setRange(0.05, 5); self.poke_rate.setDecimals(2)
         self.poke_rate.setSingleStep(0.05); self.poke_rate.setPrefix("≥ ")
         self.poke_rate.setValue(cfg.poke_deaths_per_minute)
         self.poke_rate.setKeyboardTracking(False); self.poke_rate.valueChanged.connect(self.save_poke)
-        f.addRow("死亡速率", self.poke_rate)
-        f.addRow("", QLabel(grey("死亡 ÷ 整局分鐘")))
+        sub.addRow("死亡速率", self.poke_rate)
+        sub.addRow("", QLabel(grey("死亡 ÷ 整局分鐘")))
         self.poke_kda = QDoubleSpinBox(); self.poke_kda.setRange(0.1, 10); self.poke_kda.setDecimals(2)
         self.poke_kda.setSingleStep(0.1); self.poke_kda.setPrefix("≤ ")
         self.poke_kda.setValue(cfg.poke_kda_at_most)
         self.poke_kda.setKeyboardTracking(False); self.poke_kda.valueChanged.connect(self.save_poke)
-        f.addRow("KDA", self.poke_kda)
-        f.addRow("", QLabel(grey("（擊殺 + 助攻）÷ 死亡")))
+        sub.addRow("KDA", self.poke_kda)
+        sub.addRow("", QLabel(grey("（擊殺 + 助攻）÷ 死亡")))
 
     def save_me(self):
         text = self.me.text().strip()
