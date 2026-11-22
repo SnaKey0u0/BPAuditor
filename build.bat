@@ -5,6 +5,11 @@ rem PATH 只保留 Windows 系統目錄：PATH 裡若有 Anaconda，PyInstaller 
 rem 導致執行時 "DLL load failed while importing QtCore: 找不到指定的程序"。
 setlocal
 cd /d "%~dp0"
+rem 啟用 repo 內的 git hooks（commit 前跑 ruff、merge 前跑 ruff + pytest）。這個設定存在本機 .git\config，clone 不會帶過來；
+rem 要在改 PATH 之前做，才找得到 git。
+if exist ".git" (
+    where git >nul 2>&1 && git config core.hooksPath .githooks
+)
 rem 沒有 .venv（例如剛 clone 或資料夾被清掉）就先建立並安裝套件；要在改 PATH 之前做，才找得到 py。
 if not exist ".venv\Scripts\python.exe" (
     echo 找不到 .venv，正在建立...
