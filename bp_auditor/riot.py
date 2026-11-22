@@ -255,7 +255,7 @@ class RiotClient:
             if code == 404:
                 raise RiotError("not_found", "查無此人")
             if code == 400:
-                raise RiotError("bad_request", f"Riot 拒絕這個請求（HTTP 400）")
+                raise RiotError("bad_request", "Riot 拒絕這個請求（HTTP 400）")
             if code == 429:  # 伺服器端限流（例如同一把 Key 在別處也在用）：冷卻到 Retry-After
                 retry = next((v for k, v in headers.items() if k.lower() == "retry-after"), "")
                 self._limiter.block_for(retry_after_seconds(retry))
