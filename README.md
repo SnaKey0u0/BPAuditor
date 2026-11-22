@@ -24,7 +24,7 @@
 ```powershell
 py -3.11 -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
-git config core.hooksPath .githooks        # commit 前跑 ruff、merge 前跑 ruff + pytest
+git config core.hooksPath .githooks        # commit 前跑 ruff、merge 前跑 ruff + pytest（build.bat 也會設定）
 .venv\Scripts\python -m pytest            # 測試
 bash tools/check.sh                       # ruff + pytest（hook 與 CI 跑的就是這個）
 .venv\Scripts\python run.py               # 執行
